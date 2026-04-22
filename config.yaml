@@ -1,0 +1,24 @@
+app:
+  name: procurement-dashboard
+  version: "0.1.0"
+
+paths:
+  raw_data: data/raw
+  output_dir: data/output
+
+logging:
+  level: INFO
+  format: "{time:YYYY-MM-DD HH:mm:ss} | {level} | {module} | {message}"
+
+pipeline:
+  allowed_file_types:
+    - sales
+    - planning
+    - inventory
+    - abc
+    - gross_profit_year
+    - radiator_abc
+    - radiator_jan
+    - radiator_feb
+    - radiator_mar
+    - radiator_apr
