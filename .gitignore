@@ -3,7 +3,12 @@ __pycache__/
 .DS_Store
 .env
 *.log
+.vscode/
+.idea/
+
 data/output/
 *.csv
 *.html
 *.pdf
+*.xlsx
+*.xls
