@@ -1,0 +1,24 @@
+import pandas as pd
+
+from app.db.connection import get_engine
+from app.db.torg_queries import load_invoice_lines
+
+
+config = {
+    "database": {
+        "host": "localhost",
+        "port": 5433,
+        "dbname": "torg_full",
+        "user": "nikitos",
+        "password": "nikitos",
+    }
+}
+
+engine = get_engine(config)
+
+df = load_invoice_lines(engine)
+
+print(df.head())
+print(df.info())
+print("rows:", len(df))
+print("revenue:", df["line_amount"].sum())
