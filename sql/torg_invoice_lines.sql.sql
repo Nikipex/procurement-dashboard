@@ -1,18 +1,75 @@
-SELECT
-  d._number AS invoice_number,
-  d._date_time AS invoice_created_at,
-  d._posted AS is_posted,
-  n._code AS product_code,
-  n._description AS product_name,
-  t._fld3143 AS qty,
-  t._fld3154 AS unit_price,
-  t._fld3151 AS line_amount
-FROM public._document162 d
-JOIN public._document162_vt3139 t
-  ON d._idrref = t._document162_idrref
-JOIN public._reference80 n
-  ON t._fld3146rref = n._idrref
-WHERE d._posted = true
-  AND d._date_time >= CURRENT_DATE - INTERVAL '90 days'
-ORDER BY d._date_time DESC
-LIMIT 500;
+SELECT '_fld6004rref -> reference97' AS link, COUNT(*) AS matches
+FROM public._document240 d
+JOIN public._reference97 r ON d._fld6004rref = r._idrref
+
+UNION ALL
+SELECT '_fld6005rref -> reference97', COUNT(*)
+FROM public._document240 d
+JOIN public._reference97 r ON d._fld6005rref = r._idrref
+
+UNION ALL
+SELECT '_fld6006rref -> reference97', COUNT(*)
+FROM public._document240 d
+JOIN public._reference97 r ON d._fld6006rref = r._idrref
+
+UNION ALL
+SELECT '_fld6004rref -> reference80', COUNT(*)
+FROM public._document240 d
+JOIN public._reference80 r ON d._fld6004rref = r._idrref
+
+UNION ALL
+SELECT '_fld6005rref -> reference80', COUNT(*)
+FROM public._document240 d
+JOIN public._reference80 r ON d._fld6005rref = r._idrref
+
+UNION ALL
+SELECT '_fld6006rref -> reference80', COUNT(*)
+FROM public._document240 d
+JOIN public._reference80 r ON d._fld6006rref = r._idrref
+
+UNION ALL
+SELECT '_fld6004rref -> reference55', COUNT(*)
+FROM public._document240 d
+JOIN public._reference55 r ON d._fld6004rref = r._idrref
+
+UNION ALL
+SELECT '_fld6005rref -> reference55', COUNT(*)
+FROM public._document240 d
+JOIN public._reference55 r ON d._fld6005rref = r._idrref
+
+UNION ALL
+SELECT '_fld6006rref -> reference55', COUNT(*)
+FROM public._document240 d
+JOIN public._reference55 r ON d._fld6006rref = r._idrref
+
+UNION ALL
+SELECT '_fld6004rref -> reference51', COUNT(*)
+FROM public._document240 d
+JOIN public._reference51 r ON d._fld6004rref = r._idrref
+
+UNION ALL
+SELECT '_fld6005rref -> reference51', COUNT(*)
+FROM public._document240 d
+JOIN public._reference51 r ON d._fld6005rref = r._idrref
+
+UNION ALL
+SELECT '_fld6006rref -> reference51', COUNT(*)
+FROM public._document240 d
+JOIN public._reference51 r ON d._fld6006rref = r._idrref
+
+UNION ALL
+SELECT '_fld6004rref -> reference44', COUNT(*)
+FROM public._document240 d
+JOIN public._reference44 r ON d._fld6004rref = r._idrref
+
+UNION ALL
+SELECT '_fld6005rref -> reference44', COUNT(*)
+FROM public._document240 d
+JOIN public._reference44 r ON d._fld6005rref = r._idrref
+
+UNION ALL
+SELECT '_fld6006rref -> reference44', COUNT(*)
+FROM public._document240 d
+JOIN public._reference44 r ON d._fld6006rref = r._idrref
+
+ORDER BY matches DESC;

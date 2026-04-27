@@ -26,3 +26,13 @@ print("revenue:", df["line_amount"].sum())
 df.to_csv("data/exports/invoice_lines_90d.csv", index=False)
 
 print("CSV saved")
+top_products = (
+    df.groupby("product_name", as_index=False)["line_amount"]
+      .sum()
+      .sort_values("line_amount", ascending=False)
+      .head(20)
+)
+
+print(top_products)
+top_products.to_csv("data/exports/top_products_90d.csv", index=False)
+print("TOP products saved")
