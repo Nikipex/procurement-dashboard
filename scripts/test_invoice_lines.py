@@ -22,3 +22,7 @@ print(df.head())
 print(df.info())
 print("rows:", len(df))
 print("revenue:", df["line_amount"].sum())
+
+df.to_csv("data/exports/invoice_lines_90d.csv", index=False)
+
+print("CSV saved")
