@@ -115,14 +115,14 @@ def build_pdf_report(df: pd.DataFrame, output_path: Path) -> None:
 
     story = []
 
-    period_start = df["invoice_created_at"].min().strftime("%d.%m.%Y")
-    period_end = df["invoice_created_at"].max().strftime("%d.%m.%Y")
+    period_start = df["document_created_at"].min().strftime("%d.%m.%Y")
+    period_end = df["document_created_at"].max().strftime("%d.%m.%Y")
 
-    revenue = df["line_amount"].sum()
+    revenue = df["revenue"].sum()
     qty = df["qty"].sum()
-    invoice_count = df["invoice_number"].nunique()
+    document_count = df["document_number"].nunique()
     sku_count = df["product_code"].nunique()
-    avg_invoice = revenue / invoice_count if invoice_count else 0
+    avg_document = revenue / document_count if document_count else 0
 
     story.append(Paragraph("Отчет по продажам v2", title_style))
     story.append(Paragraph(f"Период: {period_start} - {period_end}", styles["Normal"]))
@@ -131,8 +131,8 @@ def build_pdf_report(df: pd.DataFrame, output_path: Path) -> None:
     kpi_data = [
         ["Показатель", "Значение"],
         ["Выручка", fmt_money(revenue)],
-        ["Количество счетов", fmt_qty(invoice_count)],
-        ["Средний счет", fmt_money(avg_invoice)],
+        ["Количество документов", fmt_qty(document_count)],
+        ["Средний документ", fmt_money(avg_document)],
         ["Продано, шт", fmt_qty(qty)],
         ["Уникальных SKU", fmt_qty(sku_count)],
         ["Строк данных", fmt_qty(len(df))],
@@ -143,7 +143,7 @@ def build_pdf_report(df: pd.DataFrame, output_path: Path) -> None:
 
     top_products = (
         df.groupby("product_name", as_index=False)
-        .agg(revenue=("line_amount", "sum"), qty=("qty", "sum"))
+        .agg(revenue=("revenue", "sum"), qty=("qty", "sum"))
         .sort_values("revenue", ascending=False)
         .head(15)
     )
@@ -161,19 +161,19 @@ def build_pdf_report(df: pd.DataFrame, output_path: Path) -> None:
     story.append(Spacer(1, 12))
 
     df = df.copy()
-    df["invoice_date"] = df["invoice_created_at"].dt.date
+    df["document_date"] = df["document_created_at"].dt.date
 
     daily = (
-        df.groupby("invoice_date", as_index=False)
-        .agg(revenue=("line_amount", "sum"), qty=("qty", "sum"))
-        .sort_values("invoice_date", ascending=False)
+        df.groupby("document_date", as_index=False)
+        .agg(revenue=("revenue", "sum"), qty=("qty", "sum"))
+        .sort_values("document_date", ascending=False)
         .head(15)
     )
 
     daily_data = [["Дата", "Выручка", "Продано, шт"]]
     for _, row in daily.iterrows():
         daily_data.append([
-            row["invoice_date"].strftime("%d.%m.%Y"),
+            row["document_date"].strftime("%d.%m.%Y"),
             fmt_money(row["revenue"]),
             fmt_qty(row["qty"]),
         ])
@@ -185,7 +185,7 @@ def build_pdf_report(df: pd.DataFrame, output_path: Path) -> None:
     story.append(
         Paragraph(
             "Краткий вывод: отчет построен напрямую из PostgreSQL-базы 1C. "
-            "Источник данных: счета, строки счетов и справочник номенклатуры.",
+            "Источник данных: документы реализации/валовой прибыли, строки документов и справочник номенклатуры.",
             styles["Normal"],
         )
     )

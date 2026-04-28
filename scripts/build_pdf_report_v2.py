@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from app.db.connection import get_engine
-from app.db.torg_queries import load_invoice_lines
+from app.db.torg_queries import load_sales_lines_gross_profit
 from app.reports.pdf_report_v2 import build_pdf_report
 
 
@@ -18,7 +18,7 @@ config = {
 
 def main():
     engine = get_engine(config)
-    df = load_invoice_lines(engine)
+    df = load_sales_lines_gross_profit(engine)
 
     output_path = Path("output/sales_report_v2.pdf")
     build_pdf_report(df, output_path)
