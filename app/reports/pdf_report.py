@@ -274,6 +274,181 @@ def _kpi_cards(total_products, total_revenue, active_clients, avg_revenue_per_cl
     return table
 
 
+# === Procurement PDF Report additions ===
+
+def _procurement_kpi_cards(total_products, critical_count, out_of_stock_count, total_stock_qty, styles):
+    cards = [
+        [
+            Paragraph("Целевых товарных позиций", styles["CardLabel"]),
+            Paragraph("Остаток, шт", styles["CardLabel"]),
+        ],
+        [
+            Paragraph(_fmt_int(total_products), styles["CardValue"]),
+            Paragraph(_fmt_int(total_stock_qty), styles["CardValue"]),
+        ],
+        [
+            Paragraph("Критичных позиций", styles["CardLabel"]),
+            Paragraph("Out of stock", styles["CardLabel"]),
+        ],
+        [
+            Paragraph(_fmt_int(critical_count), styles["CardValue"]),
+            Paragraph(_fmt_int(out_of_stock_count), styles["CardValue"]),
+        ],
+    ]
+
+    table = Table(cards, colWidths=[85 * mm, 85 * mm])
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+                ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#CBD5E1")),
+                ("INNERGRID", (0, 0), (-1, -1), 0.6, colors.HexColor("#E2E8F0")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+                ("TOPPADDING", (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F8FAFC")),
+                ("BACKGROUND", (0, 2), (-1, 2), colors.HexColor("#F8FAFC")),
+            ]
+        )
+    )
+    return table
+
+
+def _is_procurement_dataset(df) -> bool:
+    if df is None or getattr(df, "empty", True):
+        return False
+    return {"product_group", "stock_status", "stock_qty", "sales_qty_60d"}.issubset(df.columns)
+
+
+def _fmt_days(value) -> str:
+    numeric = _safe_number(value, -1)
+    if numeric < 0:
+        return "—"
+    return f"{numeric:.1f}"
+
+
+def _build_procurement_pdf_report(final_df, output_path: str, period_label: str):
+    doc = SimpleDocTemplate(
+        output_path,
+        pagesize=A4,
+        rightMargin=18 * mm,
+        leftMargin=18 * mm,
+        topMargin=16 * mm,
+        bottomMargin=16 * mm,
+    )
+    styles = _build_styles()
+    elements = []
+
+    df = final_df.copy()
+    df = df[df["product_group"] != "прочее"].copy()
+
+    elements.append(Paragraph("Закупочный отчёт: Южный склад", styles["ReportTitle"]))
+    subtitle = f"Период продаж: {period_label}. Источник: 1С PostgreSQL / public.procurement_south_mvp"
+    elements.append(Paragraph(subtitle, styles["ReportSubtitle"]))
+
+    total_products = int(df["product_name"].nunique())
+    critical_count = int((df["stock_status"] == "critical").sum())
+    out_of_stock_count = int((df["stock_status"] == "out_of_stock").sum())
+    total_stock_qty = _safe_number(df["stock_qty"].sum(), 0)
+
+    elements.append(_section_header("Ключевые показатели закупки", "#334155", styles))
+    elements.append(Spacer(1, 4))
+    elements.append(_procurement_kpi_cards(total_products, critical_count, out_of_stock_count, total_stock_qty, styles))
+    elements.append(Spacer(1, 12))
+
+    critical_data = [["Группа", "Наименование", "Остаток", "Продажи 60д", "Дней"]]
+    critical_df = df[df["stock_status"].isin(["out_of_stock", "critical"])].copy()
+    if not critical_df.empty:
+        critical_df = critical_df.sort_values(
+            by=["stock_status", "days_of_cover", "sales_qty_60d"],
+            ascending=[True, True, False],
+        ).head(15)
+        for _, row in critical_df.iterrows():
+            critical_data.append(
+                [
+                    str(row.get("product_group", "")),
+                    _truncate(row.get("product_name", ""), 44),
+                    _fmt_int(row.get("stock_qty", 0)),
+                    _fmt_int(row.get("sales_qty_60d", 0)),
+                    _fmt_days(row.get("days_of_cover")),
+                ]
+            )
+    critical_data = _ensure_table_has_rows(critical_data)
+
+    elements.append(_section_header("Критичные позиции и отсутствующие товары", "#C62828", styles))
+    elements.append(Spacer(1, 4))
+    elements.append(_styled_table(critical_data, [28 * mm, 78 * mm, 22 * mm, 25 * mm, 17 * mm], header_color="#C62828"))
+    elements.append(Spacer(1, 12))
+
+    top_sales_data = [["Группа", "Наименование", "Остаток", "Продажи 60д", "Дней"]]
+    top_sales = df.sort_values("sales_qty_60d", ascending=False).head(15)
+    for _, row in top_sales.iterrows():
+        top_sales_data.append(
+            [
+                str(row.get("product_group", "")),
+                _truncate(row.get("product_name", ""), 44),
+                _fmt_int(row.get("stock_qty", 0)),
+                _fmt_int(row.get("sales_qty_60d", 0)),
+                _fmt_days(row.get("days_of_cover")),
+            ]
+        )
+    top_sales_data = _ensure_table_has_rows(top_sales_data)
+
+    elements.append(_section_header("Топ продаж за 60 дней", "#2E7D32", styles))
+    elements.append(Spacer(1, 4))
+    elements.append(_styled_table(top_sales_data, [28 * mm, 78 * mm, 22 * mm, 25 * mm, 17 * mm], header_color="#2E7D32"))
+    elements.append(Spacer(1, 12))
+
+    group_data = [["Группа", "Позиций", "Остаток", "Продажи 60д", "Critical/OOS"]]
+    group_summary = (
+        df.assign(is_risk=df["stock_status"].isin(["out_of_stock", "critical"]))
+        .groupby("product_group", dropna=True)
+        .agg(
+            products=("product_name", "nunique"),
+            stock_qty=("stock_qty", "sum"),
+            sales_qty_60d=("sales_qty_60d", "sum"),
+            risk_count=("is_risk", "sum"),
+        )
+        .reset_index()
+        .sort_values("sales_qty_60d", ascending=False)
+    )
+    for _, row in group_summary.iterrows():
+        group_data.append(
+            [
+                str(row.get("product_group", "")),
+                _fmt_int(row.get("products", 0)),
+                _fmt_int(row.get("stock_qty", 0)),
+                _fmt_int(row.get("sales_qty_60d", 0)),
+                _fmt_int(row.get("risk_count", 0)),
+            ]
+        )
+    group_data = _ensure_table_has_rows(group_data)
+
+    elements.append(_section_header("Сводка по товарным группам", "#1976D2", styles))
+    elements.append(Spacer(1, 4))
+    elements.append(_styled_table(group_data, [45 * mm, 25 * mm, 35 * mm, 35 * mm, 30 * mm], header_color="#1976D2"))
+    elements.append(Spacer(1, 12))
+
+    note = (
+        "Отчёт построен по прямой выгрузке из PostgreSQL 1С. "
+        "Статусы считаются по остатку Южного склада, продажам за последние 60 дней, "
+        "среднесуточной продаже и дням покрытия."
+    )
+    elements.append(
+        KeepTogether(
+            [
+                _section_header("Краткий вывод", "#1E3A5F", styles),
+                Spacer(1, 4),
+                Paragraph(note, styles["BodyNote"]),
+            ]
+        )
+    )
+
+    doc.build(elements)
+    logger.info("Procurement PDF report built: %s", output_path)
+
+
 def _pick_quantity_column(df):
     candidates = [
         "quantity",
@@ -607,6 +782,46 @@ def _build_product_metrics(final_df, sales_df):
     are merged before rendering the PDF.
     """
     if final_df is None or getattr(final_df, "empty", True):
+        if sales_df is not None and not getattr(sales_df, "empty", True) and {"product_name", "sale_amount"}.issubset(sales_df.columns):
+            logger.info("PDF product metrics source=sales_df only")
+            tmp_sales = sales_df.copy()
+
+            if "row_type" in tmp_sales.columns:
+                tmp_sales = tmp_sales[tmp_sales["row_type"].isin(["product", "", None])].copy()
+
+            tmp_sales["product_name"] = tmp_sales["product_name"].astype(str).str.strip()
+            tmp_sales = tmp_sales[tmp_sales["product_name"] != ""].copy()
+            tmp_sales = tmp_sales[tmp_sales["product_name"].apply(_is_valid_product_name_for_pdf)].copy()
+
+            tmp_sales["sale_amount"] = tmp_sales["sale_amount"].apply(_safe_number)
+            qty_col = _pick_quantity_column(tmp_sales)
+            if qty_col:
+                tmp_sales[qty_col] = tmp_sales[qty_col].apply(_safe_number)
+            else:
+                tmp_sales["__qty"] = 0.0
+                qty_col = "__qty"
+
+            tmp_sales["category"] = tmp_sales["product_name"].apply(_detect_product_category)
+            tmp_sales["match_key"] = tmp_sales["product_name"].apply(_normalize_match_key)
+
+            result = (
+                tmp_sales.groupby(["match_key", "category"], dropna=True)
+                .agg(
+                    product_name=("product_name", "first"),
+                    revenue=("sale_amount", "sum"),
+                    qty=(qty_col, "sum"),
+                )
+                .reset_index()
+            )
+
+            logger.info(
+                "PDF product metrics source=sales_df rows=%s revenue_sum=%s qty_sum=%s",
+                len(result),
+                _safe_number(result["revenue"].sum(), 0),
+                _safe_number(result["qty"].sum(), 0),
+            )
+            return result[["product_name", "revenue", "qty", "category"]]
+
         logger.warning("PDF product metrics source=empty final_df")
         empty = _empty_product_metrics_df(final_df)
         if empty is None:
@@ -802,6 +1017,10 @@ def _ensure_table_has_rows(table_data, empty_label="Нет данных"):
 
 
 def build_pdf_report(final_df, sales_df, output_path: str, period_label: str = "20.01.2026 – 20.03.2026", pdf_sales_df=None):
+    has_sales_pdf_source = pdf_sales_df is not None and not getattr(pdf_sales_df, "empty", True)
+    if _is_procurement_dataset(final_df) and not has_sales_pdf_source:
+        return _build_procurement_pdf_report(final_df, output_path, period_label)
+
     doc = SimpleDocTemplate(
         output_path,
         pagesize=A4,
@@ -827,9 +1046,13 @@ def build_pdf_report(final_df, sales_df, output_path: str, period_label: str = "
     logger.info("final_df columns=%s", list(final_df.columns) if final_df is not None else [])
     logger.info("sales_df columns=%s", list(report_sales_df.columns) if report_sales_df is not None else [])
 
-    product_metrics_df = _build_product_metrics(final_df, report_sales_df)
+    product_metrics_source_df = None if has_sales_pdf_source else final_df
+    product_metrics_df = _build_product_metrics(product_metrics_source_df, report_sales_df)
     total_products = int(product_metrics_df["product_name"].nunique()) if product_metrics_df is not None and not product_metrics_df.empty else len(final_df)
-    total_revenue = _safe_number(product_metrics_df["revenue"].sum(), 0) if product_metrics_df is not None and not product_metrics_df.empty else 0
+    if report_sales_df is not None and not getattr(report_sales_df, "empty", True) and "sale_amount" in report_sales_df.columns:
+        total_revenue = _safe_number(report_sales_df["sale_amount"].sum(), 0)
+    else:
+        total_revenue = _safe_number(product_metrics_df["revenue"].sum(), 0) if product_metrics_df is not None and not product_metrics_df.empty else 0
 
     active_clients = 0
     if report_sales_df is not None and not report_sales_df.empty and "customer_name" in report_sales_df.columns:
@@ -884,35 +1107,9 @@ def build_pdf_report(final_df, sales_df, output_path: str, period_label: str = "
     elements.append(_styled_table(top_sold_data, [105 * mm, 35 * mm, 30 * mm], header_color="#2E7D32"))
     elements.append(Spacer(1, 12))
 
-    # Low sold products (exclude radiators: they have a separate section)
-    low_allowed_categories = {"columns", "boilers", "stabilizers"}
-
-    low_sold_data = [["Наименование", "Выручка", "Продано, шт"]]
-    if product_metrics_df is not None and not product_metrics_df.empty:
-        low_sold = product_metrics_df.copy()
-        low_sold = low_sold[low_sold["category"].isin(low_allowed_categories)].copy()
-        low_sold = low_sold[low_sold["revenue"] >= 1000].copy()
-        low_sold = low_sold.sort_values(by=["qty", "revenue"], ascending=[True, True]).head(10)
-
-        for _, row in low_sold.iterrows():
-            low_sold_data.append(
-                [
-                    _truncate(row.get("product_name", ""), 58),
-                    _fmt_int(row.get("revenue", 0)),
-                    _fmt_int(row.get("qty", 0)),
-                ]
-            )
-
-    low_sold_data = _ensure_table_has_rows(low_sold_data)
-
-    elements.append(_section_header("Топ-10 слабопродаваемых позиций", "#EF6C00", styles))
-    elements.append(Spacer(1, 4))
-    elements.append(_styled_table(low_sold_data, [105 * mm, 35 * mm, 30 * mm], header_color="#EF6C00"))
-    elements.append(Spacer(1, 12))
-
     # Top radiator sales
     radiator_sales_data = [["Радиатор", "Выручка", "Продано, шт"]]
-    radiator_metrics_df = _build_radiator_metrics(final_df, report_sales_df)
+    radiator_metrics_df = _build_radiator_metrics(product_metrics_source_df, report_sales_df)
     if product_metrics_df is not None and not product_metrics_df.empty:
         logger.info(
             "PDF product metrics preview: %s",
@@ -947,17 +1144,13 @@ def build_pdf_report(final_df, sales_df, output_path: str, period_label: str = "
     elements.append(_styled_table(radiator_sales_data, [105 * mm, 35 * mm, 30 * mm], header_color="#C62828"))
     elements.append(Spacer(1, 12))
 
-    # Top clients by sales amount and net profit from customer rows only
+    # Top clients by sales amount and net profit from PostgreSQL sales rows
     top_clients_data = [["Клиент", "Сумма продажи", "Чистая прибыль"]]
     if report_sales_df is not None and not report_sales_df.empty and {"customer_name", "sale_amount"}.issubset(report_sales_df.columns):
         clients_df = report_sales_df.copy()
 
-        if "row_type" in clients_df.columns:
-            clients_df = clients_df[clients_df["row_type"] == "customer"].copy()
-
         clients_df["customer_name"] = clients_df["customer_name"].astype(str).str.strip()
-        clients_df["product_name"] = clients_df.get("product_name", "").astype(str).str.strip()
-        clients_df["customer_order"] = clients_df.get("customer_order", "").astype(str).str.strip()
+        clients_df["customer_name"] = clients_df["customer_name"].str.replace(r"\s+", " ", regex=True)
         clients_df["sale_amount"] = clients_df["sale_amount"].apply(_safe_number)
 
         if "net_profit" in clients_df.columns:
@@ -968,18 +1161,10 @@ def build_pdf_report(final_df, sales_df, output_path: str, period_label: str = "
             clients_df["net_profit"] = 0.0
 
         clients_df = clients_df[
-            clients_df.apply(
-                lambda r: _is_likely_client_row(
-                    r["customer_name"],
-                    r["product_name"],
-                    r["customer_order"],
-                ),
-                axis=1,
-            )
+            (clients_df["customer_name"] != "")
+            & (~clients_df["customer_name"].str.lower().isin(["none", "nan"]))
+            & (clients_df["sale_amount"] > 0)
         ].copy()
-
-        clients_df = clients_df[clients_df["sale_amount"] > 0].copy()
-        clients_df["customer_name"] = clients_df["customer_name"].str.replace(r"\s+", " ", regex=True)
 
         top_clients = (
             clients_df.groupby("customer_name", dropna=True)
