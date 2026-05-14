@@ -79,6 +79,59 @@ def _get_dashboard_scope_df(df: pd.DataFrame) -> pd.DataFrame:
     return scoped_df
 
 
+def _normalize_product_name_for_dashboard(value: str) -> str:
+    """Normalize names only for display-level deduplication."""
+    import re
+
+    name = str(value or "").lower().replace("ё", "е")
+
+    # Unipump pump duplicates:
+    # build canonical key by hydraulic size, not by casing or UPC/CP prefix.
+    # Examples:
+    # - Unipump ... UPC 25-40 130
+    # - unipump ... cp 25-40 130
+    # => unipump-pump-25-40-130
+    if "unipump" in name and "насос" in name:
+        match = re.search(r"(25|32)\s*-\s*(40|60|80)\s*(130|180)", name)
+        if match:
+            return f"unipump-pump-{match.group(1)}-{match.group(2)}-{match.group(3)}"
+
+        name = re.sub(r"\b(upc|cp)\b", "", name)
+
+    name = re.sub(r"\s+", " ", name).strip()
+    return name
+
+
+def _collapse_display_duplicates(group_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Collapse duplicate dashboard rows caused by different spelling/casing/source joins.
+
+    Main use case: Unipump насосы duplicated as uppercase/lowercase rows,
+    where one row has real sales and another has zero-sales stock residue.
+    """
+    if group_df.empty or "product_name" not in group_df.columns:
+        return group_df.copy()
+
+    df = group_df.copy()
+    df["__display_key"] = df["product_name"].apply(_normalize_product_name_for_dashboard)
+
+    sort_cols = []
+    ascending = []
+
+    for col in ["sales_qty_60d", "avg_daily_sales", "recommended_order_qty_display", "stock_qty"]:
+        if col in df.columns:
+            sort_cols.append(col)
+            ascending.append(False)
+
+    if sort_cols:
+        df = df.sort_values(sort_cols, ascending=ascending)
+
+    df = df.drop_duplicates(subset=["__display_key"], keep="first")
+    df = df.drop(columns=["__display_key"])
+
+    return df
+
+
 def _format_display_df(display_df: pd.DataFrame) -> pd.DataFrame:
     display_df = display_df.copy()
 
@@ -186,6 +239,7 @@ def _is_rens_radiator_position(product_name: str) -> bool:
     return has_core_pattern and has_12_marker
 
 
+
 def _is_excluded_radiator_brand(product_name: str) -> bool:
     """
     Exclude substitute/secondary radiator variants from the main RENS radiator block,
@@ -193,6 +247,32 @@ def _is_excluded_radiator_brand(product_name: str) -> bool:
     Delegates to the shared function in product_rules.
     """
     return is_excluded_radiator_brand(product_name)
+
+
+def _is_custom_or_vendor_radiator_garbage(product_name: str) -> bool:
+    """
+    Hide custom/color/vendor radiator variants from the main radiator procurement table.
+
+    Examples to hide:
+    - Стальной радиатор 500//22*1200 RENS (1,2) RAL 2004
+    - Стальной радиатор 500//22*0800 (1,2) ABM-Сервис
+    """
+    name = str(product_name or "").strip().lower().replace("ё", "е")
+    garbage_patterns = [
+        "ral",
+        "abm",
+        "абм",
+        "сервис",
+        "ruterm",
+        "orso",
+        "sanline",
+        "proexpert",
+    ]
+    if any(pattern in name for pattern in garbage_patterns):
+        return True
+
+    import re
+    return bool(re.search(r"\b(vcr|vcu)\b", name))
 
 
 def _build_group_blocks(df: pd.DataFrame, css_class: str, per_group_limit: int | None, mode: str) -> str:
@@ -216,7 +296,17 @@ def _build_group_blocks(df: pd.DataFrame, css_class: str, per_group_limit: int |
         if group_df.empty:
             continue
 
-        if mode == "critical":
+        # Coaxials from CAMINO should be shown as the full assortment list.
+        # Do not collapse display duplicates here: accessories like decorative cuffs,
+        # aluminum elbows, clamps and seals may have similar names but different sizes/codes.
+        if group_name != "коаксиалы":
+            group_df = _collapse_display_duplicates(group_df)
+
+        if group_name == "коаксиалы":
+            sort_columns = ["product_name", "product_code"]
+            ascending = [True, True]
+            columns = ORDERS_TABLE_COLUMNS
+        elif mode == "critical":
             sort_columns = ["abc_priority", "days_of_cover", "recommended_order_qty_display"]
             ascending = [True, True, False]
             columns = CRITICAL_TABLE_COLUMNS
@@ -299,6 +389,19 @@ def build_recommended_orders_table(df: pd.DataFrame, top_n: int = 50) -> str:
     # not only rows with positive recommended qty.
     orders_df = scoped_df.copy()
 
+    # Coaxials are controlled by the SQL CAMINO folder filter.
+    # Do not additionally cut them by dashboard visibility here, because useful CAMINO
+    # accessories such as decorative cuffs and aluminum elbows may have zero order qty
+    # but still must be visible in the grouped procurement table.
+    if "product_group" in df.columns:
+        all_coaxials_df = df[df["product_group"] == "коаксиалы"].copy()
+        if not all_coaxials_df.empty:
+            non_coaxial_orders_df = orders_df[orders_df["product_group"] != "коаксиалы"].copy()
+            orders_df = pd.concat([non_coaxial_orders_df, all_coaxials_df], ignore_index=True)
+            if orders_df.columns.duplicated().any():
+                orders_df = orders_df.loc[:, ~orders_df.columns.duplicated()].copy()
+            logger.info(f"Coaxials forced into recommended orders table from full dataframe: {len(all_coaxials_df)} rows")
+
     if orders_df.empty:
         return "<div>Нет данных для закупки</div>"
 
@@ -339,6 +442,10 @@ def build_radiator_table(df: pd.DataFrame, top_n: int = 20) -> str:
         ~radiator_df["product_name"].apply(_is_excluded_radiator_brand)
     ].copy()
 
+    radiator_df = radiator_df[
+        ~radiator_df["product_name"].apply(_is_custom_or_vendor_radiator_garbage)
+    ].copy()
+
     if radiator_df.empty:
         return "<div>Нет позиций радиаторов RENS 1,2</div>"
 
@@ -352,7 +459,7 @@ def build_radiator_table(df: pd.DataFrame, top_n: int = 20) -> str:
         ascending=[True, False]
     )
 
-    columns = RADIATOR_TABLE_COLUMNS
+    columns = [col for col in RADIATOR_TABLE_COLUMNS if col != "radiator_target_stock_qty"]
 
     available_columns = [col for col in columns if col in radiator_df.columns]
     display_df = radiator_df[available_columns].copy()

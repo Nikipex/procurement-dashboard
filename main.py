@@ -4,6 +4,8 @@ from pathlib import Path
 from loguru import logger
 import yaml
 import pandas as pd
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
 
 # Add app to path for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -20,6 +22,7 @@ from app.adapters.radiator_margin_adapter import adapt_radiator_margin_report
 
 from app.services.merge_service import MergeService
 from app.services.metrics_service import MetricsService
+from app.services.product_classifier import classify_product_group
 from app.dashboard.dashboard_builder import build_dashboard
 from app.reports.pdf_report import build_pdf_report
 
@@ -37,6 +40,412 @@ def setup_logging(config: dict):
         format=log_cfg.get("format", "{time:YYYY-MM-DD HH:mm:ss} | {level} | {module} | {message}"),
         level=log_cfg.get("level", "INFO")
     )
+
+
+def is_enabled(value: str | None) -> bool:
+    """Parse feature flags from environment variables."""
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def load_postgres_procurement_dataset(database_url: str) -> pd.DataFrame:
+    """Load procurement mart from PostgreSQL and apply product classification."""
+    engine = create_engine(database_url)
+    df = pd.read_sql("SELECT * FROM public.procurement_south_dashboard", engine)
+
+    if df.empty:
+        logger.warning("PostgreSQL procurement mart returned empty dataset")
+        return df
+
+    # PostgreSQL mart already provides trusted product_group.
+    # Do not reclassify CAMINO accessories by name, otherwise decorative cuffs,
+    # aluminum elbows and other valid coaxial items become "прочее" and disappear.
+    if "product_group" not in df.columns or df["product_group"].isna().all():
+        df["product_group"] = df["product_name"].apply(classify_product_group)
+
+    df = df[df["product_group"] != "прочее"].copy()
+
+    # Business cleanup for PostgreSQL dashboard layer.
+    # Solpi: keep only the core fast-moving SKU; drop other Solpi variants.
+    product_name_norm = df["product_name"].astype(str).str.lower().str.replace("ё", "е", regex=False)
+    solpi_mask = product_name_norm.str.contains("solpi", na=False)
+    solpi_allowed_mask = (
+        product_name_norm.str.contains("solpi", na=False)
+        & product_name_norm.str.contains("tsd", na=False)
+        & product_name_norm.str.contains("500", na=False)
+    )
+    before_solpi_rows = len(df)
+    df = df[(~solpi_mask) | solpi_allowed_mask].copy()
+    removed_solpi_rows = before_solpi_rows - len(df)
+    if removed_solpi_rows:
+        logger.info(f"Dropped non-core Solpi stabilizer rows from dashboard: {removed_solpi_rows}")
+
+    logger.info(
+        "PostgreSQL procurement dataset loaded: "
+        f"rows={len(df)}, groups={df['product_group'].value_counts().to_dict()}"
+    )
+    return df
+
+
+# ---- Radiator mart loader ----
+
+def load_postgres_radiator_dataset(database_url: str) -> pd.DataFrame:
+    """Load radiator procurement mart from PostgreSQL."""
+    engine = create_engine(database_url)
+    query = """
+    WITH radiator_base AS (
+        SELECT *
+        FROM public.radiator_procurement_mvp
+    ),
+    monthly_sales AS (
+        SELECT
+            TRIM(REGEXP_REPLACE(LOWER(product_name), '\\s+', ' ', 'g')) AS product_name,
+            SUM(CASE WHEN sale_period::date >= DATE '2026-01-01' AND sale_period::date < DATE '2026-02-01' THEN qty ELSE 0 END) AS radiator_qty_jan_2026,
+            SUM(CASE WHEN sale_period::date >= DATE '2026-02-01' AND sale_period::date < DATE '2026-03-01' THEN qty ELSE 0 END) AS radiator_qty_feb_2026,
+            SUM(CASE WHEN sale_period::date >= DATE '2026-03-01' AND sale_period::date < DATE '2026-04-01' THEN qty ELSE 0 END) AS radiator_qty_mar_2026,
+            SUM(CASE WHEN sale_period::date >= DATE '2026-04-01' AND sale_period::date < DATE '2026-05-01' THEN qty ELSE 0 END) AS radiator_qty_apr_2026
+        FROM public.sales_south_krasnodar
+        WHERE LOWER(product_name) ~ 'стальной\\s+радиатор\\s+(200|300|500)//(11|22)\\*\\d{4}'
+          AND POSITION('1,2' IN LOWER(product_name)) > 0
+          AND LOWER(product_name) !~ 'ruterm|orso|sanline|proexpert|\\bvcr\\b|\\bvcu\\b'
+        GROUP BY TRIM(REGEXP_REPLACE(LOWER(product_name), '\\s+', ' ', 'g'))
+    )
+    SELECT
+        r.*,
+        COALESCE(m.radiator_qty_jan_2026, 0) AS radiator_qty_jan_2026,
+        COALESCE(m.radiator_qty_feb_2026, 0) AS radiator_qty_feb_2026,
+        COALESCE(m.radiator_qty_mar_2026, 0) AS radiator_qty_mar_2026,
+        COALESCE(m.radiator_qty_apr_2026, 0) AS radiator_qty_apr_2026
+    FROM radiator_base r
+    LEFT JOIN monthly_sales m
+        ON TRIM(REGEXP_REPLACE(LOWER(r.product_name), '\\s+', ' ', 'g')) = m.product_name
+    """
+    df = pd.read_sql(query, engine)
+
+    if df.empty:
+        logger.warning("PostgreSQL radiator mart returned empty dataset")
+        return df
+
+    # Keep only regular RENS-like steel radiator positions and drop color/custom/vendor garbage.
+    product_name_norm = df["product_name"].astype(str).str.lower().str.replace("ё", "е", regex=False)
+    garbage_radiator_mask = (
+        product_name_norm.str.contains("ral", na=False)
+        | product_name_norm.str.contains("abm", na=False)
+        | product_name_norm.str.contains("абм", na=False)
+        | product_name_norm.str.contains("сервис", na=False)
+        | product_name_norm.str.contains("ruterm", na=False)
+        | product_name_norm.str.contains("orso", na=False)
+        | product_name_norm.str.contains("sanline", na=False)
+        | product_name_norm.str.contains("proexpert", na=False)
+        | product_name_norm.str.contains(r"\bvcr\b", regex=True, na=False)
+        | product_name_norm.str.contains(r"\bvcu\b", regex=True, na=False)
+    )
+    before_radiator_rows = len(df)
+    df = df[~garbage_radiator_mask].copy()
+    removed_radiator_rows = before_radiator_rows - len(df)
+    if removed_radiator_rows:
+        logger.info(f"Dropped custom/vendor radiator rows from dashboard: {removed_radiator_rows}")
+
+    df["product_group"] = "радиаторы"
+    logger.info(f"Radiator dataset loaded: rows={len(df)}")
+    return df
+
+
+# ---- PostgreSQL sales PDF loader for Postgres pipeline ----
+def load_postgres_sales_pdf_dataset(database_url: str) -> pd.DataFrame:
+    """Load executive sales-report dataset from PostgreSQL.
+
+    This keeps the old executive PDF layout, but removes the Excel source from
+    the PostgreSQL pipeline. Source view: public.sales_report_pdf.
+    """
+    engine = create_engine(database_url)
+    query = """
+        SELECT
+            sale_date,
+            document_number,
+            product_id_hex,
+            product_code,
+            product_name,
+            client_id_hex,
+            client_name,
+            qty,
+            revenue,
+            cost,
+            profit,
+            price_per_unit,
+            margin_percent
+        FROM public.sales_report_pdf
+        WHERE qty <> 0
+    """
+
+    try:
+        pdf_sales_df = pd.read_sql(query, engine)
+    except Exception as e:
+        logger.exception(f"Failed to load PostgreSQL sales PDF dataset: {e}")
+        return pd.DataFrame()
+
+    if pdf_sales_df.empty:
+        logger.warning("PostgreSQL sales PDF dataset is empty: public.sales_report_pdf")
+        return pdf_sales_df
+
+    numeric_columns = [
+        "qty",
+        "revenue",
+        "cost",
+        "profit",
+        "price_per_unit",
+        "margin_percent",
+    ]
+    for column in numeric_columns:
+        if column in pdf_sales_df.columns:
+            pdf_sales_df[column] = pd.to_numeric(pdf_sales_df[column], errors="coerce").fillna(0)
+
+    if "sale_date" in pdf_sales_df.columns:
+        pdf_sales_df["sale_date"] = pd.to_datetime(pdf_sales_df["sale_date"], errors="coerce")
+
+    # Legacy Excel-layout aliases for executive PDF.
+    pdf_sales_df["sale_amount"] = pdf_sales_df["revenue"] if "revenue" in pdf_sales_df.columns else 0
+    pdf_sales_df["net_profit"] = pdf_sales_df["profit"] if "profit" in pdf_sales_df.columns else 0
+    pdf_sales_df["quantity"] = pdf_sales_df["qty"] if "qty" in pdf_sales_df.columns else 0
+    pdf_sales_df["customer_name"] = pdf_sales_df["client_name"] if "client_name" in pdf_sales_df.columns else ""
+    pdf_sales_df["customer_order"] = pdf_sales_df["document_number"] if "document_number" in pdf_sales_df.columns else ""
+
+    logger.info(
+        "PostgreSQL sales PDF dataset loaded: "
+        f"rows={len(pdf_sales_df)}, columns={pdf_sales_df.columns.tolist()}, "
+        f"revenue_sum={pdf_sales_df['revenue'].sum():,.2f}, "
+        f"profit_sum={pdf_sales_df['profit'].sum():,.2f}"
+    )
+
+    return pdf_sales_df
+
+
+def prepare_postgres_dashboard_dataset(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert PostgreSQL mart columns to the dashboard/PDF-compatible metric shape.
+
+    This keeps the old Excel pipeline untouched while allowing dashboard/PDF builders
+    to consume the new PostgreSQL procurement mart.
+    """
+    result = df.copy()
+
+    if "product_key" not in result.columns:
+        result["product_key"] = result.get("product_code", result.index.astype(str))
+
+    if "abc_class" not in result.columns:
+        result["abc_class"] = "B"
+
+    if "free_stock_qty" not in result.columns:
+        result["free_stock_qty"] = result.get("stock_qty", 0)
+
+    if "avg_daily_sales_model" not in result.columns:
+        result["avg_daily_sales_model"] = result.get("avg_daily_sales", 0)
+
+    if "avg_weekly_sales" not in result.columns:
+        result["avg_weekly_sales"] = result.get("avg_daily_sales", 0) * 7
+
+    if "recommended_order_qty" not in result.columns:
+        target_days = 30
+        result["recommended_order_qty"] = (
+            result.get("avg_daily_sales", 0) * target_days - result.get("stock_qty", 0)
+        ).clip(lower=0).round()
+
+    if "is_critical" not in result.columns:
+        result["is_critical"] = result.get("stock_status", "").isin(["out_of_stock", "critical"])
+
+    if "critical_reason" not in result.columns:
+        result["critical_reason"] = result.get("stock_status", "")
+
+    result["recommended_order_qty"] = pd.to_numeric(
+        result.get("recommended_order_qty", 0),
+        errors="coerce",
+    ).fillna(0)
+    result["recommended_order_qty_display"] = result["recommended_order_qty"].round(0)
+
+    return result
+
+
+# ---- Radiator dashboard preparation ----
+def prepare_postgres_radiator_dashboard_dataset(df: pd.DataFrame) -> pd.DataFrame:
+    """Prepare SQL radiator mart for the old dashboard visual contract.
+
+    The old Excel dashboard expected monthly radiator columns and
+    `recommended_order_qty_display`. PostgreSQL mart gives us the stable
+    stock/sales base; here we only restore display-compatible fields.
+    """
+    result = df.copy()
+
+    if result.empty:
+        return result
+
+    result["product_group"] = "радиаторы"
+
+    if "product_key" not in result.columns:
+        result["product_key"] = result.get("product_code", result.index.astype(str))
+
+    if "free_stock_qty" not in result.columns:
+        result["free_stock_qty"] = result.get("stock_qty", 0)
+
+    if "avg_daily_sales_model" not in result.columns:
+        result["avg_daily_sales_model"] = result.get("avg_daily_sales", 0)
+
+    if "avg_weekly_sales" not in result.columns:
+        result["avg_weekly_sales"] = result.get("avg_daily_sales", 0) * 7
+
+    if "radiator_abc_class" in result.columns:
+        result["abc_class"] = result["radiator_abc_class"].fillna("C")
+    elif "abc_class" not in result.columns:
+        result["abc_class"] = "C"
+
+    month_cols_for_demand = [
+        "radiator_qty_jan_2026",
+        "radiator_qty_feb_2026",
+        "radiator_qty_mar_2026",
+    ]
+    available_month_cols = [col for col in month_cols_for_demand if col in result.columns]
+
+    if available_month_cols:
+        for col in available_month_cols + ["radiator_qty_apr_2026"]:
+            if col in result.columns:
+                column_data = result[col]
+            if isinstance(column_data, pd.DataFrame):
+                logger.warning(f"Radiator column {col} is duplicated; using first occurrence")
+                column_data = column_data.iloc[:, 0]
+            result[col] = pd.to_numeric(column_data, errors="coerce").fillna(0)
+
+        result["radiator_monthly_demand"] = (
+            result[available_month_cols]
+            .mean(axis=1)
+            .round(2)
+        )
+
+    result["radiator_coverage"] = result["abc_class"].map({"A": 1.0, "B": 0.7, "C": 0.5}).fillna(0.5)
+
+    # Radiators are ordered ahead, often by truck batches.
+    # Use SQL planning horizon if present: A=3 months, B=2 months, C=1 month.
+    if "radiator_planning_months" not in result.columns:
+        result["radiator_planning_months"] = (
+            result["abc_class"]
+            .astype(str)
+            .str.upper()
+            .map({"A": 3.0, "B": 2.0, "C": 1.0})
+            .fillna(1.0)
+        )
+
+    result["radiator_target_stock_qty"] = (
+        pd.to_numeric(result.get("radiator_monthly_demand", 0), errors="coerce").fillna(0)
+        * pd.to_numeric(result["radiator_coverage"], errors="coerce").fillna(0.5)
+        * pd.to_numeric(result["radiator_planning_months"], errors="coerce").fillna(1.0)
+    ).round(2)
+
+    stock_qty = pd.to_numeric(result.get("stock_qty", 0), errors="coerce").fillna(0)
+    result["recommended_order_qty"] = (
+        result["radiator_target_stock_qty"] - stock_qty
+    ).clip(lower=0).round(0)
+
+    result["recommended_order_qty_display"] = result["recommended_order_qty"]
+
+    if "is_critical" not in result.columns:
+        result["is_critical"] = result["recommended_order_qty"] > 0
+
+    if "critical_reason" not in result.columns:
+        result["critical_reason"] = result.get("recommendation_reason", "")
+
+    return result
+
+
+def run_postgres_pipeline(base_dir: Path, config: dict) -> None:
+    """Run dashboard/PDF generation from PostgreSQL instead of Excel files."""
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise ValueError(f"DATABASE_URL not found in {base_dir / '.env'}")
+
+    logger.info("Using PostgreSQL pipeline: public.procurement_south_dashboard + public.radiator_procurement_mvp")
+
+    procurement_df = load_postgres_procurement_dataset(database_url)
+    radiator_df = load_postgres_radiator_dataset(database_url)
+
+    if procurement_df.empty and radiator_df.empty:
+        logger.error("Both procurement and radiator datasets are empty. Exiting.")
+        return
+
+    procurement_prepared = prepare_postgres_dashboard_dataset(procurement_df) if not procurement_df.empty else pd.DataFrame()
+    radiator_prepared = prepare_postgres_radiator_dashboard_dataset(radiator_df) if not radiator_df.empty else pd.DataFrame()
+
+    # Safety: concat requires unique column names in both frames.
+    if not procurement_prepared.empty and procurement_prepared.columns.duplicated().any():
+        duplicated_columns = procurement_prepared.columns[procurement_prepared.columns.duplicated()].tolist()
+        logger.warning(f"Dropping duplicate procurement columns before concat: {duplicated_columns}")
+        procurement_prepared = procurement_prepared.loc[:, ~procurement_prepared.columns.duplicated()].copy()
+
+    if not radiator_prepared.empty and radiator_prepared.columns.duplicated().any():
+        duplicated_columns = radiator_prepared.columns[radiator_prepared.columns.duplicated()].tolist()
+        logger.warning(f"Dropping duplicate radiator columns before concat: {duplicated_columns}")
+        radiator_prepared = radiator_prepared.loc[:, ~radiator_prepared.columns.duplicated()].copy()
+
+    final_df = pd.concat([procurement_prepared, radiator_prepared], ignore_index=True)
+
+    # Final safety cleanup before dashboard/PDF builders.
+    if not final_df.empty and "product_name" in final_df.columns:
+        product_name_norm = final_df["product_name"].astype(str).str.lower().str.replace("ё", "е", regex=False)
+
+        radiator_garbage_mask = (
+            (final_df.get("product_group", "").astype(str) == "радиаторы")
+            & (
+                product_name_norm.str.contains("ral", na=False)
+                | product_name_norm.str.contains("abm", na=False)
+                | product_name_norm.str.contains("абм", na=False)
+                | product_name_norm.str.contains("сервис", na=False)
+                | product_name_norm.str.contains("ruterm", na=False)
+                | product_name_norm.str.contains("orso", na=False)
+                | product_name_norm.str.contains("sanline", na=False)
+                | product_name_norm.str.contains("proexpert", na=False)
+                | product_name_norm.str.contains(r"\bvcr\b", regex=True, na=False)
+                | product_name_norm.str.contains(r"\bvcu\b", regex=True, na=False)
+            )
+        )
+
+        solpi_garbage_mask = (
+            (final_df.get("product_group", "").astype(str) == "стабилизаторы")
+            & product_name_norm.str.contains("solpi", na=False)
+            & ~(
+                product_name_norm.str.contains("tsd", na=False)
+                & product_name_norm.str.contains("500", na=False)
+            )
+        )
+
+        before_final_rows = len(final_df)
+        final_df = final_df[~(radiator_garbage_mask | solpi_garbage_mask)].copy()
+        removed_final_rows = before_final_rows - len(final_df)
+        if removed_final_rows:
+            logger.info(f"Final dashboard cleanup dropped rows: {removed_final_rows}")
+
+    output_dir = base_dir / config["paths"]["output_dir"]
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    output_path = output_dir / "product_metrics_postgres.csv"
+    final_df.to_csv(output_path, index=False)
+    logger.success(f"PostgreSQL metrics saved to {output_path}")
+
+    classified_path = output_dir / "procurement_south_dashboard_classified.xlsx"
+    final_df.to_excel(classified_path, index=False)
+    logger.success(f"Classified procurement dataset saved to {classified_path}")
+
+    dashboard_path = output_dir / "dashboard_postgres.html"
+    build_dashboard(final_df, str(dashboard_path))
+    logger.success(f"PostgreSQL dashboard saved to {dashboard_path}")
+
+    pdf_path = output_dir / "report_postgres.pdf"
+    pdf_sales_df = load_postgres_sales_pdf_dataset(database_url)
+
+    if pdf_sales_df.empty:
+        logger.error(
+            "Executive sales PDF was not generated: PostgreSQL sales source is empty or missing. "
+            "This prevents accidental fallback to procurement PDF layout."
+        )
+    else:
+        build_pdf_report(final_df, pdf_sales_df, str(pdf_path), period_label="14.01.2026 – 14.04.2026", pdf_sales_df=pdf_sales_df)
+        logger.success(f"Executive sales PDF report saved to {pdf_path}")
+
+    logger.success("PostgreSQL pipeline completed successfully.")
 
 def dispatch_adapter(file_path: Path, file_type: str) -> pd.DataFrame:
     """
@@ -70,6 +479,7 @@ def dispatch_adapter(file_path: Path, file_type: str) -> pd.DataFrame:
 def main():
     # 1. Load Configuration
     BASE_DIR = Path(__file__).resolve().parent
+    load_dotenv(BASE_DIR / ".env")
     config_path = BASE_DIR / "config.yaml"
     if not config_path.exists():
         logger.error(f"config.yaml not found: {config_path}")
@@ -89,6 +499,10 @@ def main():
     logger.info(f"Allowed file types: {sorted(allowed_file_types)}")
     
     logger.info(f"Starting {config['app']['name']} v{config['app']['version']}")
+
+    if is_enabled(os.getenv("USE_POSTGRES_PIPELINE")):
+        run_postgres_pipeline(BASE_DIR, config)
+        return
     
     # 2. Discover Files
     raw_dir = BASE_DIR / config["paths"]["raw_data"]
