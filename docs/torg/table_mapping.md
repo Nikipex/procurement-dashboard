@@ -65,3 +65,31 @@ Fields:
 Fields:
 - `_code` — bank code / BIK
 - `_description` — bank name
+
+## Confirmed sales / gross profit source
+
+### `_document240`
+
+Вероятно: реализация / отгрузка / документ валовой прибыли.
+
+Fields:
+- `_idrref` — document id
+- `_number` — document number
+- `_date_time` — document datetime
+- `_posted` — posted flag
+
+### `_document240_vt6039`
+
+Строки реализации / валовой прибыли.
+
+Fields:
+- `_document240_idrref` — link to `_document240._idrref`
+- `_fld6047rref` — product link to `_reference80._idrref`
+- `_fld6044` — quantity
+- `_fld6052` — sales amount / revenue
+- `_fld6053` — cost / gross-profit related amount
+- `_fld6055` — additional amount / tax / discount candidate
+
+### `_reference80`
+
+Номенклатура / товары.

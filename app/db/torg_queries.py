@@ -15,3 +15,8 @@ def read_sql_file(relative_path: str) -> str:
 def load_invoice_lines(engine: Engine) -> pd.DataFrame:
     query = read_sql_file("sql/views/invoice_lines.sql")
     return pd.read_sql(query, engine)
+
+
+def load_sales_lines_gross_profit(engine: Engine) -> pd.DataFrame:
+    query = read_sql_file("sql/views/sales_lines_gross_profit.sql")
+    return pd.read_sql(query, engine)
