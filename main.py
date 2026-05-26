@@ -26,6 +26,13 @@ from app.services.product_classifier import classify_product_group
 from app.dashboard.dashboard_builder import build_dashboard
 from app.reports.pdf_report import build_pdf_report
 
+PROJECT_DIR = Path(__file__).resolve().parent
+
+
+def read_sql(relative_path: str) -> str:
+    return (PROJECT_DIR / relative_path).read_text(encoding="utf-8")
+
+
 def load_config(config_path: str) -> dict:
     """Load configuration from YAML file."""
     with open(config_path, "r") as f:
@@ -50,7 +57,7 @@ def is_enabled(value: str | None) -> bool:
 def load_postgres_procurement_dataset(database_url: str) -> pd.DataFrame:
     """Load procurement mart from PostgreSQL and apply product classification."""
     engine = create_engine(database_url)
-    df = pd.read_sql("SELECT * FROM public.procurement_south_dashboard", engine)
+    df = pd.read_sql(read_sql("sql/live_readonly/procurement_south_dashboard.sql"), engine)
 
     if df.empty:
         logger.warning("PostgreSQL procurement mart returned empty dataset")
@@ -91,34 +98,7 @@ def load_postgres_procurement_dataset(database_url: str) -> pd.DataFrame:
 def load_postgres_radiator_dataset(database_url: str) -> pd.DataFrame:
     """Load radiator procurement mart from PostgreSQL."""
     engine = create_engine(database_url)
-    query = """
-    WITH radiator_base AS (
-        SELECT *
-        FROM public.radiator_procurement_mvp
-    ),
-    monthly_sales AS (
-        SELECT
-            TRIM(REGEXP_REPLACE(LOWER(product_name), '\\s+', ' ', 'g')) AS product_name,
-            SUM(CASE WHEN sale_period::date >= DATE '2026-01-01' AND sale_period::date < DATE '2026-02-01' THEN qty ELSE 0 END) AS radiator_qty_jan_2026,
-            SUM(CASE WHEN sale_period::date >= DATE '2026-02-01' AND sale_period::date < DATE '2026-03-01' THEN qty ELSE 0 END) AS radiator_qty_feb_2026,
-            SUM(CASE WHEN sale_period::date >= DATE '2026-03-01' AND sale_period::date < DATE '2026-04-01' THEN qty ELSE 0 END) AS radiator_qty_mar_2026,
-            SUM(CASE WHEN sale_period::date >= DATE '2026-04-01' AND sale_period::date < DATE '2026-05-01' THEN qty ELSE 0 END) AS radiator_qty_apr_2026
-        FROM public.sales_south_krasnodar
-        WHERE LOWER(product_name) ~ 'стальной\\s+радиатор\\s+(200|300|500)//(11|22)\\*\\d{4}'
-          AND POSITION('1,2' IN LOWER(product_name)) > 0
-          AND LOWER(product_name) !~ 'ruterm|orso|sanline|proexpert|\\bvcr\\b|\\bvcu\\b'
-        GROUP BY TRIM(REGEXP_REPLACE(LOWER(product_name), '\\s+', ' ', 'g'))
-    )
-    SELECT
-        r.*,
-        COALESCE(m.radiator_qty_jan_2026, 0) AS radiator_qty_jan_2026,
-        COALESCE(m.radiator_qty_feb_2026, 0) AS radiator_qty_feb_2026,
-        COALESCE(m.radiator_qty_mar_2026, 0) AS radiator_qty_mar_2026,
-        COALESCE(m.radiator_qty_apr_2026, 0) AS radiator_qty_apr_2026
-    FROM radiator_base r
-    LEFT JOIN monthly_sales m
-        ON TRIM(REGEXP_REPLACE(LOWER(r.product_name), '\\s+', ' ', 'g')) = m.product_name
-    """
+    query = read_sql("sql/live_readonly/radiator_procurement_mvp.sql")
     df = pd.read_sql(query, engine)
 
     if df.empty:
@@ -383,6 +363,18 @@ def run_postgres_pipeline(base_dir: Path, config: dict) -> None:
 
     final_df = pd.concat([procurement_prepared, radiator_prepared], ignore_index=True)
 
+    # Safety for mixed PostgreSQL datasets:
+    # procurement mart has stock_status, radiator mart may not.
+    if "stock_status" not in final_df.columns:
+        final_df["stock_status"] = "ok"
+
+    stock_qty_series = pd.to_numeric(final_df.get("stock_qty", 0), errors="coerce").fillna(0)
+    recommended_series = pd.to_numeric(final_df.get("recommended_order_qty", 0), errors="coerce").fillna(0)
+
+    final_df["stock_status"] = final_df["stock_status"].fillna("ok")
+    final_df.loc[stock_qty_series <= 0, "stock_status"] = "out_of_stock"
+    final_df.loc[(stock_qty_series > 0) & (recommended_series > 0), "stock_status"] = "critical"
+
     # Final safety cleanup before dashboard/PDF builders.
     if not final_df.empty and "product_name" in final_df.columns:
         product_name_norm = final_df["product_name"].astype(str).str.lower().str.replace("ё", "е", regex=False)
@@ -430,6 +422,17 @@ def run_postgres_pipeline(base_dir: Path, config: dict) -> None:
     logger.success(f"Classified procurement dataset saved to {classified_path}")
 
     dashboard_path = output_dir / "dashboard_postgres.html"
+    # Final safety before dashboard rendering.
+    if "stock_status" not in final_df.columns:
+        final_df["stock_status"] = "ok"
+
+    stock_qty_series = pd.to_numeric(final_df.get("stock_qty", 0), errors="coerce").fillna(0)
+    recommended_series = pd.to_numeric(final_df.get("recommended_order_qty", 0), errors="coerce").fillna(0)
+
+    final_df["stock_status"] = final_df["stock_status"].fillna("ok")
+    final_df.loc[stock_qty_series <= 0, "stock_status"] = "out_of_stock"
+    final_df.loc[(stock_qty_series > 0) & (recommended_series > 0), "stock_status"] = "critical"
+
     build_dashboard(final_df, str(dashboard_path))
     logger.success(f"PostgreSQL dashboard saved to {dashboard_path}")
 
