@@ -1,4 +1,18 @@
+
+def _brand_priority_for_display(name: str) -> int:
+    n = str(name).lower().replace("ё", "е")
+    if "fondital" in n:
+        return 1
+    if "federica" in n or "bugatti" in n:
+        return 2
+    if "baxi" in n:
+        return 3
+    if "navien" in n:
+        return 4
+    return 99
+
 import pandas as pd
+from app.config.radiator_months import get_radiator_month_columns
 from loguru import logger
 
 from app.config.dashboard_rules import (
@@ -324,22 +338,40 @@ def _build_group_blocks(df: pd.DataFrame, css_class: str, per_group_limit: int |
 
         existing_sort_columns = [col for col in sort_columns if col in group_df.columns]
         existing_ascending = [ascending[i] for i, col in enumerate(sort_columns) if col in group_df.columns]
-        if existing_sort_columns:
+        if group_name == "котлы":
+            group_df["brand_priority"] = group_df["product_name"].apply(_brand_priority_for_display)
+            group_df = group_df.sort_values(
+                by=["brand_priority", "recommended_order_qty_display", "abc_priority", "product_name"],
+                ascending=[True, False, True, True],
+            )
+        elif existing_sort_columns:
             group_df = group_df.sort_values(existing_sort_columns, ascending=existing_ascending)
 
         if per_group_limit is not None:
             group_df = group_df.head(per_group_limit)
         available_columns = [col for col in columns if col in group_df.columns]
+
+        # Коэф. покрытия нужен только для радиаторов.
+        # У остальных групп эта колонка не несёт смысла и засоряет таблицу.
+        if group_name != "радиаторы":
+            available_columns = [
+                col for col in available_columns
+                if col != "radiator_coverage"
+            ]
+
         display_df = group_df[available_columns].copy()
         display_df = _format_display_df(display_df)
+
+        if group_name == "радиаторы":
+            display_df = _apply_radiator_visuals(display_df)
 
         group_title = GROUP_TITLES.get(group_name, group_name.title())
         table_html = _render_table(display_df, css_class)
         html_blocks.append(
-            f'<div class="group-block">'
-            f'<h3 class="group-title">{group_title}</h3>'
+            f'<details class="group-block" open>'
+            f'<summary class="group-title">{group_title}</summary>'
             f'{table_html}'
-            f'</div>'
+            f'</details>'
         )
 
     if not html_blocks:
@@ -465,14 +497,22 @@ def build_radiator_table(df: pd.DataFrame, top_n: int = 20) -> str:
     display_df = radiator_df[available_columns].copy()
     if "radiator_abc_class" in display_df.columns:
         display_df["radiator_abc_class"] = display_df["radiator_abc_class"].fillna("C")
-    if "radiator_qty_jan_2026" in display_df.columns:
-        display_df["radiator_qty_jan_2026"] = display_df["radiator_qty_jan_2026"].fillna(0)
-    if "radiator_qty_feb_2026" in display_df.columns:
-        display_df["radiator_qty_feb_2026"] = display_df["radiator_qty_feb_2026"].fillna(0)
-    if "radiator_qty_mar_2026" in display_df.columns:
-        display_df["radiator_qty_mar_2026"] = display_df["radiator_qty_mar_2026"].fillna(0)
-    if "radiator_qty_apr_2026" in display_df.columns:
-        display_df["radiator_qty_apr_2026"] = display_df["radiator_qty_apr_2026"].fillna(0)
+    radiator_month_cols = get_radiator_month_columns(include_current_month=True)
+    available_radiator_month_cols = [
+        col for col in radiator_month_cols if col in display_df.columns
+    ]
+
+    for col in available_radiator_month_cols:
+        display_df[col] = pd.to_numeric(display_df[col], errors="coerce").fillna(0)
+
+    if available_radiator_month_cols:
+        display_df["radiator_monthly_demand"] = (
+            display_df[available_radiator_month_cols].mean(axis=1).round(2)
+        )
+
+    for col in get_radiator_month_columns(include_current_month=True):
+        if col in display_df.columns:
+            display_df[col] = display_df[col].fillna(0)
     logger.info(
         "Radiator table preview before formatting:\n"
         + display_df.head(30).to_string()

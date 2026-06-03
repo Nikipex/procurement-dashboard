@@ -1,4 +1,5 @@
 import pandas as pd
+from app.config.radiator_months import get_radiator_month_columns
 import numpy as np
 from loguru import logger
 from typing import Dict
@@ -239,31 +240,22 @@ class MetricsService:
         return max(1, today.month - 1)
 
     def _get_radiator_monthly_demand(self, row: pd.Series) -> float:
-        """
-        Monthly demand based on recent monthly radiator reports.
-        Uses up to last 3 months with non-negative sales only.
-        Works dynamically with monthly columns like radiator_qty_jan_2026.
-        """
-        month_cols = []
-        for col in row.index:
-            if isinstance(col, str) and col.startswith("radiator_qty_") and re.search(r"_\d{4}$", col):
-                month_cols.append(col)
-
-        month_cols = sorted(month_cols, reverse=True)
+        """Average radiator demand over all available displayed month columns."""
+        month_cols = get_radiator_month_columns(include_current_month=True)
 
         values = []
         for col in month_cols:
-            v = self._sanitize_non_negative_number(row.get(col, np.nan))
-            if v > 0:
-                values.append(v)
-            if len(values) == 3:
-                break
+            if col not in row.index:
+                continue
+            try:
+                values.append(float(row.get(col) or 0))
+            except Exception:
+                values.append(0.0)
 
         if values:
-            return float(np.mean(values))
+            return round(sum(values) / len(values), 2)
 
-        fallback_month = pd.to_numeric(row.get("preferred_daily_sales", 0), errors="coerce") * self.working_days_per_month
-        return float(fallback_month if pd.notna(fallback_month) and fallback_month > 0 else 0.0)
+        return 0.0
 
     def _get_radiator_procurement_daily_sales(self, row: pd.Series) -> int:
         monthly_demand = self._get_radiator_monthly_demand(row)
@@ -524,7 +516,21 @@ class MetricsService:
             radiator_df = df.loc[radiator_mask].copy()
             radiator_df = self._sanitize_radiator_month_columns(radiator_df)
 
-            radiator_df["radiator_monthly_demand"] = radiator_df.apply(self._get_radiator_monthly_demand, axis=1)
+            month_cols = get_radiator_month_columns(include_current_month=True)
+            available_month_cols = [col for col in month_cols if col in radiator_df.columns]
+
+            if available_month_cols:
+                for col in available_month_cols:
+                    radiator_df[col] = pd.to_numeric(radiator_df[col], errors="coerce").fillna(0)
+
+                radiator_df["radiator_monthly_demand"] = (
+                    radiator_df[available_month_cols].mean(axis=1).round(2)
+                )
+            else:
+                radiator_df["radiator_monthly_demand"] = radiator_df.apply(
+                    self._get_radiator_monthly_demand,
+                    axis=1,
+                )
 
             radiator_abc_series = radiator_df.get("radiator_abc_class")
             if radiator_abc_series is None:

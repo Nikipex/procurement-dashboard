@@ -213,7 +213,15 @@ base AS (
         COALESCE(s.product_code::text, st.product_code::text, pp.product_code::text) AS product_code,
         COALESCE(s.product_name::text, st.product_name::text, pp.product_name::text) AS product_name,
 
-        COALESCE(st.stock_qty, 0) AS stock_qty,
+        CASE
+            WHEN lower(COALESCE(s.product_name::text, st.product_name::text, pp.product_name::text, '')) LIKE '%%baxi%%'
+             AND lower(COALESCE(s.product_name::text, st.product_name::text, pp.product_name::text, '')) LIKE '%%eco%%'
+             AND lower(COALESCE(s.product_name::text, st.product_name::text, pp.product_name::text, '')) LIKE '%%4s%%'
+             AND lower(COALESCE(s.product_name::text, st.product_name::text, pp.product_name::text, '')) LIKE '%%24%%'
+             AND lower(COALESCE(s.product_name::text, st.product_name::text, pp.product_name::text, '')) NOT LIKE '%%1.24%%'
+            THEN 0
+            ELSE COALESCE(st.stock_qty, 0)
+        END AS stock_qty,
         COALESCE(s.sales_qty_60d, pp.sales_qty_60d, 0) AS sales_qty_60d,
         COALESCE(s.avg_daily_sales, pp.avg_daily_sales, 0) AS avg_daily_sales,
 
@@ -305,12 +313,17 @@ classified AS (
 
             WHEN lower(replace(coalesce(p.product_name::text, ''), 'ё', 'е')) ILIKE '%%baxi%%'
               OR lower(replace(coalesce(p.product_name::text, ''), 'ё', 'е')) ILIKE '%%navien%%'
+              OR lower(replace(coalesce(p.product_name::text, ''), 'ё', 'е')) ILIKE '%%fondital%%'
               OR lower(replace(coalesce(p.product_name::text, ''), 'ё', 'е')) ILIKE '%%котел%%'
                 THEN 'котлы'
 
             WHEN lower(replace(coalesce(p.product_name::text, ''), 'ё', 'е')) ILIKE '%%водонагреватель%%'
               OR lower(replace(coalesce(p.product_name::text, ''), 'ё', 'е')) ILIKE '%%бойлер%%'
               OR lower(replace(coalesce(p.product_name::text, ''), 'ё', 'е')) ILIKE '%%ariston%%'
+              OR ((lower(replace(coalesce(p.product_name::text, ''), 'ё', 'е')) ILIKE '%%bugatti%%'
+                   OR lower(replace(coalesce(p.product_name::text, ''), 'ё', 'е')) ILIKE '%%federica%%')
+                  AND (lower(replace(coalesce(p.product_name::text, ''), 'ё', 'е')) ILIKE '%%водонагреватель%%'
+                       OR lower(replace(coalesce(p.product_name::text, ''), 'ё', 'е')) ILIKE '%%бойлер%%'))
                 THEN 'бойлеры'
 
             WHEN lower(replace(coalesce(p.product_name::text, ''), 'ё', 'е')) ILIKE '%%колонк%%'
@@ -387,6 +400,27 @@ flags AS (
             WHEN product_name_norm ~ '^navien deluxe e coaxial 16k\s*2х контур\.?$' THEN true
             WHEN product_name_norm ~ '^navien deluxe e coaxial 24k\s*2х контур\.?$' THEN true
             WHEN product_name_norm ~ '^navien heatatmo ngb 150 24 a$' THEN true
+
+            -- Fondital / Federica Bugatti — котлы, считаем по схеме BAXI/Navien
+            WHEN product_name_norm LIKE '%%fondital%%' THEN true
+
+            -- Federica/Bugatti: котлы только если явно котел/газовый/varme
+            WHEN (product_name_norm LIKE '%%federica%%' OR product_name_norm LIKE '%%bugatti%%')
+              AND (
+                    product_name_norm LIKE '%%котел%%'
+                 OR product_name_norm LIKE '%%котёл%%'
+                 OR product_name_norm LIKE '%%газовый%%'
+                 OR product_name_norm LIKE '%%varme%%'
+              )
+            THEN true
+
+            -- Federica/Bugatti: бойлеры/водонагреватели в блок бойлеров
+            WHEN (product_name_norm LIKE '%%federica%%' OR product_name_norm LIKE '%%bugatti%%')
+              AND (
+                    product_name_norm LIKE '%%водонагреватель%%'
+                 OR product_name_norm LIKE '%%бойлер%%'
+              )
+            THEN true
 
             -- Бойлеры — нужные позиции, без Inox / FA / Superlux
             WHEN product_name_norm ~ '^водонагреватель ariston abs vls pro r 50$' THEN true
@@ -516,6 +550,15 @@ abc_classified AS (
             WHEN product_group = 'котлы'
                  AND product_name_norm LIKE '%%navien%%'
                  AND product_name_norm LIKE '%%deluxe%%'
+                 AND product_name_norm LIKE '%%24%%'
+                THEN 'A'
+
+            WHEN product_group = 'котлы'
+                 AND (
+                     product_name_norm LIKE '%%fondital%%'
+                     OR product_name_norm LIKE '%%federica%%'
+                     OR product_name_norm LIKE '%%bugatti%%'
+                 )
                  AND product_name_norm LIKE '%%24%%'
                 THEN 'A'
 

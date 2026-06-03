@@ -4,7 +4,6 @@ import os
 import re
 import logging
 
-from app.adapters.gross_profit_adapter import adapt_gross_profit_report
 
 from reportlab.platypus import (
     SimpleDocTemplate,
@@ -368,7 +367,7 @@ def _build_procurement_pdf_report(final_df, output_path: str, period_label: str)
             critical_data.append(
                 [
                     str(row.get("product_group", "")),
-                    _truncate(row.get("product_name", ""), 44),
+                    _truncate(row.get("product_name", ""), 46),
                     _fmt_int(row.get("stock_qty", 0)),
                     _fmt_int(row.get("sales_qty_60d", 0)),
                     _fmt_days(row.get("days_of_cover")),
@@ -387,7 +386,7 @@ def _build_procurement_pdf_report(final_df, output_path: str, period_label: str)
         top_sales_data.append(
             [
                 str(row.get("product_group", "")),
-                _truncate(row.get("product_name", ""), 44),
+                _truncate(row.get("product_name", ""), 46),
                 _fmt_int(row.get("stock_qty", 0)),
                 _fmt_int(row.get("sales_qty_60d", 0)),
                 _fmt_days(row.get("days_of_cover")),
@@ -594,7 +593,7 @@ def _find_profit_report_path():
 
 def _build_qty_from_profit_report():
     """
-    Use dedicated gross_profit_adapter instead of manual parsing.
+    Use dedicated net_profit_adapter instead of manual parsing.
     Returns qty map: normalized product_name -> sold qty
     """
     file_path = _find_profit_report_path()
@@ -603,7 +602,7 @@ def _build_qty_from_profit_report():
         return {}
 
     try:
-        df = adapt_gross_profit_report(file_path)
+        df = adapt_net_profit_report(file_path)
     except Exception as e:
         logger.warning("Failed to parse profit report via adapter: %s", e)
         return {}
@@ -908,10 +907,52 @@ def _build_product_metrics(final_df, sales_df):
 
 def _build_radiator_metrics(final_df, sales_df):
     """
-    Returns columns: product_name, revenue, qty_sold.
-    Prefer radiator monthly columns from final_df because they contain
-    real sold quantities for radiator products.
+    Returns columns: product_name, revenue, qty_sold, profit.
+    Prefer sales_df because it contains real gross profit from PostgreSQL sales rows.
     """
+    if sales_df is not None and not sales_df.empty and "product_name" in sales_df.columns:
+        tmp = sales_df.copy()
+
+        if "row_type" in tmp.columns:
+            tmp = tmp[tmp["row_type"] == "product"].copy()
+
+        tmp["product_name"] = tmp["product_name"].astype(str).str.strip()
+        tmp = tmp[tmp["product_name"].apply(_is_radiator_row)].copy()
+
+        if not tmp.empty:
+            revenue_col = "sale_amount" if "sale_amount" in tmp.columns else "revenue"
+            qty_col = _pick_quantity_column(tmp)
+            profit_col = "gross_profit_calc" if "gross_profit_calc" in tmp.columns else ("profit" if "profit" in tmp.columns else None)
+
+            tmp[revenue_col] = tmp[revenue_col].apply(_safe_number)
+
+            if qty_col:
+                tmp[qty_col] = tmp[qty_col].apply(_safe_number)
+            else:
+                tmp["_qty_sold"] = 0.0
+                qty_col = "_qty_sold"
+
+            if profit_col:
+                tmp[profit_col] = tmp[profit_col].apply(_safe_number)
+            else:
+                tmp["_profit"] = 0.0
+                profit_col = "_profit"
+
+            result = (
+                tmp.groupby("product_name", dropna=True)
+                .agg(
+                    revenue=(revenue_col, "sum"),
+                    qty_sold=(qty_col, "sum"),
+                    profit=(profit_col, "sum"),
+                )
+                .reset_index()
+            )
+
+            result = result[(result["revenue"] > 0) | (result["qty_sold"] > 0)].copy()
+            if not result.empty:
+                logger.info("PDF radiator metrics source=sales_df rows=%s", len(result))
+                return result
+
     if final_df is not None and not final_df.empty and "product_name" in final_df.columns:
         tmp = final_df.copy()
         tmp["product_name"] = tmp["product_name"].astype(str).str.strip()
@@ -932,80 +973,41 @@ def _build_radiator_metrics(final_df, sales_df):
 
             if radiator_qty_cols:
                 for col in radiator_qty_cols:
-                    tmp[col] = tmp[col].apply(_safe_number)
-                    tmp[col] = tmp[col].clip(lower=0)
+                    tmp[col] = tmp[col].apply(_safe_number).clip(lower=0)
                 tmp["qty_sold"] = tmp[radiator_qty_cols].sum(axis=1)
             elif "sales_qty_60d" in tmp.columns:
                 tmp["qty_sold"] = tmp["sales_qty_60d"].apply(_safe_number)
             else:
                 tmp["qty_sold"] = 0.0
 
-            result = tmp[["product_name", "revenue", "qty_sold"]].copy()
+            tmp["profit"] = 0.0
+            result = tmp[["product_name", "revenue", "qty_sold", "profit"]].copy()
             result = result[(result["revenue"] > 0) | (result["qty_sold"] > 0)].copy()
 
             if not result.empty:
                 logger.info("PDF radiator metrics source=final_df rows=%s", len(result))
                 return result
 
-    if sales_df is not None and not sales_df.empty and {"product_name", "sale_amount"}.issubset(sales_df.columns):
-        tmp = sales_df.copy()
-
-        if "row_type" in tmp.columns:
-            tmp = tmp[tmp["row_type"] == "product"].copy()
-
-        tmp["product_name"] = tmp["product_name"].astype(str).str.strip()
-        tmp = tmp[tmp["product_name"].apply(_is_radiator_row)].copy()
-        tmp["sale_amount"] = tmp["sale_amount"].apply(_safe_number)
-
-        qty_col = _pick_quantity_column(tmp)
-        if qty_col:
-            tmp[qty_col] = tmp[qty_col].apply(_safe_number)
-            result = (
-                tmp.groupby("product_name", dropna=True)
-                .agg(
-                    revenue=("sale_amount", "sum"),
-                    qty_sold=(qty_col, "sum"),
-                )
-                .reset_index()
-            )
-        else:
-            result = (
-                tmp.groupby("product_name", dropna=True)
-                .agg(
-                    revenue=("sale_amount", "sum"),
-                )
-                .reset_index()
-            )
-            result["qty_sold"] = 0.0
-
-        result = result[(result["revenue"] > 0) | (result["qty_sold"] > 0)].copy()
-
-        if not result.empty:
-            logger.info("PDF radiator metrics source=sales_df rows=%s", len(result))
-            return result
-
     logger.warning("PDF radiator metrics source=empty")
     return None
 
 
 def _is_radiator_row(name: str) -> bool:
-    value = str(name or "").strip().lower()
+    value = str(name or "").strip().lower().replace("ё", "е")
     if not value:
         return False
 
-    positive_patterns = [
-        r"радиатор",
-        r"стальн",
-        r"\b11\*\d+\b",
-        r"\b22\*\d+\b",
-        r"\b33\*\d+\b",
-        r"\b500//11\*\d+\b",
-        r"\b500//22\*\d+\b",
-        r"\b500//33\*\d+\b",
-        r"\(\s*1,2\s*\)",
-    ]
+    # PDF needs only core steel radiators (1,2), not valves/brackets/aluminum/bimetal/accessories.
+    if "стальной радиатор" not in value:
+        return False
+    if not re.search(r"\(\s*1,2\s*\)", value):
+        return False
+    if not re.search(r"(200|300|500)//(11|22)\*\d{4}", value):
+        return False
+    if re.search(r"ruterm|orso|sanline|proexpert|\bvcr\b|\bvcu\b|кран|кронштейн|алюмин|биметалл", value):
+        return False
 
-    return any(re.search(pattern, value) for pattern in positive_patterns)
+    return True
 
 
 def _ensure_table_has_rows(table_data, empty_label="Нет данных"):
@@ -1108,7 +1110,7 @@ def build_pdf_report(final_df, sales_df, output_path: str, period_label: str = "
     elements.append(Spacer(1, 12))
 
     # Top radiator sales
-    radiator_sales_data = [["Радиатор", "Выручка", "Продано, шт"]]
+    radiator_sales_data = [["Радиатор", "Выручка", "Продано", "Маржа/шт"]]
     radiator_metrics_df = _build_radiator_metrics(product_metrics_source_df, report_sales_df)
     if product_metrics_df is not None and not product_metrics_df.empty:
         logger.info(
@@ -1122,6 +1124,12 @@ def build_pdf_report(final_df, sales_df, output_path: str, period_label: str = "
         )
 
     if radiator_metrics_df is not None and not radiator_metrics_df.empty:
+        logger.info(
+            "PDF radiator metrics columns=%s profit_sum=%s preview=%s",
+            list(radiator_metrics_df.columns),
+            _safe_number(radiator_metrics_df["profit"].sum(), 0) if "profit" in radiator_metrics_df.columns else None,
+            radiator_metrics_df.head(5).to_dict("records"),
+        )
         top_radiators = radiator_metrics_df.copy()
         top_radiators["has_12"] = top_radiators["product_name"].astype(str).str.contains(
             r"\(\s*1,2\s*\)", case=False, regex=True, na=False
@@ -1129,11 +1137,15 @@ def build_pdf_report(final_df, sales_df, output_path: str, period_label: str = "
         top_radiators = top_radiators.sort_values(by=["has_12", "revenue"], ascending=[False, False]).head(10)
 
         for _, row in top_radiators.iterrows():
+            qty_sold = _safe_number(row.get("qty_sold", 0))
+            avg_margin_per_unit = _safe_number(row.get("profit", 0)) / max(qty_sold, 1)
+
             radiator_sales_data.append(
                 [
-                    _truncate(row.get("product_name", ""), 58),
+                    _truncate(row.get("product_name", ""), 44),
                     _fmt_int(row.get("revenue", 0)),
-                    _fmt_int(row.get("qty_sold", 0)),
+                    _fmt_int(qty_sold),
+                    _fmt_int(avg_margin_per_unit),
                 ]
             )
 
@@ -1141,11 +1153,11 @@ def build_pdf_report(final_df, sales_df, output_path: str, period_label: str = "
 
     elements.append(_section_header("Топ-10 стальных радиаторов (1,2) по выручке", "#C62828", styles))
     elements.append(Spacer(1, 4))
-    elements.append(_styled_table(radiator_sales_data, [105 * mm, 35 * mm, 30 * mm], header_color="#C62828"))
+    elements.append(_styled_table(radiator_sales_data, [98 * mm, 30 * mm, 24 * mm, 30 * mm], header_color="#C62828"))
     elements.append(Spacer(1, 12))
 
-    # Top clients by sales amount and net profit from PostgreSQL sales rows
-    top_clients_data = [["Клиент", "Сумма продажи", "Чистая прибыль"]]
+    # Top clients by sales amount and gross profit from PostgreSQL sales rows
+    top_clients_data = [["Клиент", "Сумма продажи", "Валовая прибыль"]]
     if report_sales_df is not None and not report_sales_df.empty and {"customer_name", "sale_amount"}.issubset(report_sales_df.columns):
         clients_df = report_sales_df.copy()
 
@@ -1153,12 +1165,14 @@ def build_pdf_report(final_df, sales_df, output_path: str, period_label: str = "
         clients_df["customer_name"] = clients_df["customer_name"].str.replace(r"\s+", " ", regex=True)
         clients_df["sale_amount"] = clients_df["sale_amount"].apply(_safe_number)
 
-        if "net_profit" in clients_df.columns:
-            clients_df["net_profit"] = clients_df["net_profit"].apply(_safe_number)
+        if "gross_profit_calc" in clients_df.columns:
+            clients_df["gross_profit"] = clients_df["gross_profit_calc"].apply(_safe_number)
         elif "profit" in clients_df.columns:
-            clients_df["net_profit"] = clients_df["profit"].apply(_safe_number)
+            clients_df["gross_profit"] = clients_df["profit"].apply(_safe_number)
+        elif "net_profit" in clients_df.columns:
+            clients_df["gross_profit"] = clients_df["net_profit"].apply(_safe_number)
         else:
-            clients_df["net_profit"] = 0.0
+            clients_df["gross_profit"] = 0.0
 
         clients_df = clients_df[
             (clients_df["customer_name"] != "")
@@ -1170,10 +1184,10 @@ def build_pdf_report(final_df, sales_df, output_path: str, period_label: str = "
             clients_df.groupby("customer_name", dropna=True)
             .agg(
                 total_sales_amount=("sale_amount", "sum"),
-                total_net_profit=("net_profit", "sum"),
+                total_gross_profit=("gross_profit", "sum"),
             )
             .reset_index()
-            .sort_values(by=["total_sales_amount", "total_net_profit"], ascending=[False, False])
+            .sort_values(by=["total_sales_amount", "total_gross_profit"], ascending=[False, False])
             .head(10)
         )
 
@@ -1182,19 +1196,19 @@ def build_pdf_report(final_df, sales_df, output_path: str, period_label: str = "
                 [
                     _truncate(row.get("customer_name", ""), 45),
                     _fmt_int(row.get("total_sales_amount", 0)),
-                    _fmt_int(row.get("total_net_profit", 0)),
+                    _fmt_int(row.get("total_gross_profit", 0)),
                 ]
             )
     top_clients_data = _ensure_table_has_rows(top_clients_data)
 
     elements.append(_section_header("Топ-10 клиентов по сумме продаж", "#6A1B9A", styles))
     elements.append(Spacer(1, 4))
-    elements.append(_styled_table(top_clients_data, [100 * mm, 40 * mm, 30 * mm], header_color="#6A1B9A"))
+    elements.append(_styled_table(top_clients_data, [104 * mm, 38 * mm, 40 * mm], header_color="#6A1B9A"))
     elements.append(Spacer(1, 12))
 
     note = (
         "Отчёт сфокусирован на лидерах продаж, слабопродаваемых позициях, "
-        "стальных радиаторах и клиентах с наибольшей суммой продаж и чистой прибылью за период."
+        "стальных радиаторах и клиентах с наибольшим объёмом продаж и валовой прибылью за период."
     )
     elements.append(
         KeepTogether(

@@ -1,3 +1,4 @@
+from app.config.radiator_months import get_radiator_month_columns, get_radiator_month_labels
 """
 Dashboard rules: display/UI constants for the HTML dashboard —
 group ordering, column labels, table column sets, etc.
@@ -54,6 +55,8 @@ COLUMN_NAMES_RU = {
     "radiator_qty_feb_2026": "Фев 2026",
     "radiator_qty_mar_2026": "Мар 2026",
     "radiator_qty_apr_2026": "Апр 2026",
+    "radiator_qty_may_2026": "Май 2026",
+    "radiator_qty_jun_2026": "Июн 2026",
     "priority_flag": "Whitelist",
     "critical_flag": "Критично",
 }
@@ -105,6 +108,7 @@ CRITICAL_TABLE_COLUMNS = [
     "free_stock_qty",
     "days_of_cover",
     "velocity_segment",
+    "radiator_coverage",
     "recommended_order_qty_display",
 ]
 
@@ -113,19 +117,25 @@ ORDERS_TABLE_COLUMNS = [
     "abc_class",
     "free_stock_qty",
     "avg_weekly_sales",
+    "radiator_coverage",
     "recommended_order_qty_display",
 ]
 
 RADIATOR_TABLE_COLUMNS = [
     "product_name",
     "radiator_abc_class",
+    "stock_qty",
     "radiator_qty_jan_2026",
     "radiator_qty_feb_2026",
     "radiator_qty_mar_2026",
     "radiator_qty_apr_2026",
+    "radiator_qty_may_2026",
+    "radiator_qty_jun_2026",
     "radiator_monthly_demand",
     "radiator_coverage",
-    "radiator_target_stock_qty",
-    "free_stock_qty",
     "recommended_order_qty_display",
 ]
+
+
+# Dynamic radiator visible month columns
+RADIATOR_MONTH_COLUMNS = get_radiator_month_columns()

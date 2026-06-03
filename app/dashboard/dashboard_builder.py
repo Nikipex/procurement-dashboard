@@ -107,6 +107,20 @@ def calculate_kpi_summary(df: pd.DataFrame) -> dict:
     return kpi
 
 def build_dashboard(df: pd.DataFrame, output_path: str) -> None:
+    df = df.copy()
+
+    if "stock_status" not in df.columns:
+        if "recommended_order_qty" in df.columns:
+            df["stock_status"] = df["recommended_order_qty"].apply(
+                lambda x: "critical" if float(x or 0) > 0 else "ok"
+            )
+        elif "recommended_order_qty_display" in df.columns:
+            df["stock_status"] = df["recommended_order_qty_display"].apply(
+                lambda x: "critical" if float(x or 0) > 0 else "ok"
+            )
+        else:
+            df["stock_status"] = "ok"
+
     """
     Build HTML dashboard from metrics dataframe.
     

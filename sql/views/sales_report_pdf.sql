@@ -35,4 +35,5 @@ JOIN public._reference71 c
 
 WHERE d._posted = true
   AND vt._fld6044 <> 0
-  AND d._date_time::date BETWEEN DATE '2026-01-14' AND DATE '2026-04-14';
+  AND d._date_time::date >= CURRENT_DATE - INTERVAL '3 months'
+  AND d._date_time::date <= CURRENT_DATE;

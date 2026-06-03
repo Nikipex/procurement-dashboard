@@ -26,7 +26,13 @@ WITH radiator_sales_monthly AS (
         SUM(s.qty) FILTER (
             WHERE s.sale_date >= DATE '2026-04-01'
               AND s.sale_date < DATE '2026-05-01'
-        ) AS radiator_qty_apr_2026
+        ) AS radiator_qty_apr_2026,
+    radiator_qty_may_2026,
+
+        SUM(s.qty) FILTER (
+            WHERE s.sale_date >= DATE '2026-05-01'
+              AND s.sale_date < DATE '2026-06-01'
+        ) AS radiator_qty_may_2026
 
     FROM public.sales_south_krasnodar s
     WHERE LOWER(s.product_name) ~ 'стальной\s+радиатор\s+(200|300|500)//(11|22)\*\d{4}'
@@ -62,7 +68,15 @@ base AS (
         COALESCE(rs.radiator_qty_jan_2026, 0) AS radiator_qty_jan_2026,
         COALESCE(rs.radiator_qty_feb_2026, 0) AS radiator_qty_feb_2026,
         COALESCE(rs.radiator_qty_mar_2026, 0) AS radiator_qty_mar_2026,
-        COALESCE(rs.radiator_qty_apr_2026, 0) AS radiator_qty_apr_2026,
+        COALESCE(rs.radiator_qty_apr_2026,
+    radiator_qty_may_2026, 0) AS radiator_qty_apr_2026,
+    radiator_qty_may_2026,
+        COALESCE(rs.radiator_qty_may_2026, 0) AS radiator_qty_may_2026,
+
+        SUM(s.qty) FILTER (
+            WHERE s.sale_date >= DATE '2026-05-01'
+              AND s.sale_date < DATE '2026-06-01'
+        ) AS radiator_qty_may_2026,
 
         st.stock_period,
         st.as_of_date
@@ -204,6 +218,7 @@ SELECT
     radiator_qty_feb_2026,
     radiator_qty_mar_2026,
     radiator_qty_apr_2026,
+    radiator_qty_may_2026,
 
     months_with_data,
     COALESCE(radiator_monthly_demand, 0) AS radiator_monthly_demand,

@@ -153,7 +153,74 @@ def load_postgres_sales_pdf_dataset(database_url: str) -> pd.DataFrame:
             profit,
             price_per_unit,
             margin_percent
-        FROM public.sales_report_pdf
+        FROM (
+WITH RECURSIVE krasnodar_tree AS (
+    SELECT
+        _idrref,
+        _parentidrref,
+        _description,
+        0 AS level
+    FROM public._reference71
+    WHERE _idrref = decode('bae66a640748b82d11eda92c459f243c', 'hex')
+
+    UNION ALL
+
+    SELECT
+        c._idrref,
+        c._parentidrref,
+        c._description,
+        t.level + 1
+    FROM public._reference71 c
+    JOIN krasnodar_tree t
+        ON c._parentidrref = t._idrref
+),
+clients_krasnodar AS (
+    SELECT
+        _idrref AS client_id,
+        encode(_idrref, 'hex') AS client_id_hex,
+        encode(_parentidrref, 'hex') AS parent_id_hex,
+        _description::text AS client_name,
+        level
+    FROM krasnodar_tree
+    WHERE level >= 2
+)
+SELECT
+    d._date_time::date AS sale_date,
+    d._number::text AS document_number,
+
+    encode(COALESCE(n1._idrref, n2._idrref, n3._idrref, n4._idrref), 'hex') AS product_id_hex,
+    COALESCE(n1._code::text, n2._code::text, n3._code::text, n4._code::text) AS product_code,
+    COALESCE(n1._description::text, n2._description::text, n3._description::text, n4._description::text) AS product_name,
+
+    encode(c._idrref, 'hex') AS client_id_hex,
+    c._description::text AS client_name,
+
+    vt._fld6044 AS qty,
+    vt._fld6052 AS revenue,
+    vt._fld6053 AS cost,
+    vt._fld6055 AS profit,
+    vt._fld6052 / NULLIF(vt._fld6044, 0) AS price_per_unit,
+    vt._fld6055 / NULLIF(vt._fld6052, 0) * 100 AS margin_percent
+FROM public._document240 d
+JOIN public._document240_vt6039 vt
+    ON vt._document240_idrref = d._idrref
+
+LEFT JOIN public._reference80 n1 ON n1._idrref = vt._fld6041rref
+LEFT JOIN public._reference80 n2 ON n2._idrref = vt._fld6042rref
+LEFT JOIN public._reference80 n3 ON n3._idrref = vt._fld6043rref
+LEFT JOIN public._reference80 n4 ON n4._idrref = vt._fld6047rref
+
+JOIN clients_krasnodar ck
+    ON ck.client_id = d._fld6015rref
+
+JOIN public._reference71 c
+    ON c._idrref = ck.client_id
+
+WHERE d._posted = true
+  AND vt._fld6044 <> 0
+  AND d._date_time::date >= CURRENT_DATE - INTERVAL '3 months'
+  AND d._date_time::date <= CURRENT_DATE
+        ) sales_report_pdf
         WHERE qty <> 0
     """
 
@@ -188,6 +255,61 @@ def load_postgres_sales_pdf_dataset(database_url: str) -> pd.DataFrame:
     pdf_sales_df["quantity"] = pdf_sales_df["qty"] if "qty" in pdf_sales_df.columns else 0
     pdf_sales_df["customer_name"] = pdf_sales_df["client_name"] if "client_name" in pdf_sales_df.columns else ""
     pdf_sales_df["customer_order"] = pdf_sales_df["document_number"] if "document_number" in pdf_sales_df.columns else ""
+
+    # Gross profit for PDF:
+    # Current SQL `profit` behaves like unit price / pseudo-profit on many rows.
+    # Calculate management gross profit as revenue - latest_purchase_price * qty.
+    try:
+        purchase_df = pd.read_sql(
+            """
+            SELECT product_id_hex, purchase_price
+            FROM public.latest_purchase_prices
+            WHERE purchase_price > 0
+            """,
+            engine,
+        )
+
+        if not purchase_df.empty and "product_id_hex" in pdf_sales_df.columns:
+            purchase_df["product_id_hex"] = purchase_df["product_id_hex"].astype(str)
+            purchase_df["purchase_price_calc"] = pd.to_numeric(
+                purchase_df["purchase_price"],
+                errors="coerce",
+            )
+
+            pdf_sales_df["product_id_hex"] = pdf_sales_df["product_id_hex"].astype(str)
+            pdf_sales_df = pdf_sales_df.merge(
+                purchase_df[["product_id_hex", "purchase_price_calc"]],
+                on="product_id_hex",
+                how="left",
+            )
+
+            pdf_sales_df["qty"] = pd.to_numeric(pdf_sales_df.get("qty", 0), errors="coerce").fillna(0)
+            pdf_sales_df["revenue"] = pd.to_numeric(pdf_sales_df.get("revenue", 0), errors="coerce").fillna(0)
+            pdf_sales_df["estimated_cost_calc"] = (
+                pdf_sales_df["purchase_price_calc"].fillna(0) * pdf_sales_df["qty"]
+            ).round(2)
+            pdf_sales_df["gross_profit_calc"] = (
+                pdf_sales_df["revenue"] - pdf_sales_df["estimated_cost_calc"]
+            ).round(2)
+
+            # If no purchase price found, don't invent margin.
+            pdf_sales_df.loc[pdf_sales_df["purchase_price_calc"].isna(), "gross_profit_calc"] = 0.0
+
+            logger.info(
+                "Gross profit calc added: matched_rows=%s, gross_profit_calc_sum=%s",
+                int(pdf_sales_df["purchase_price_calc"].notna().sum()),
+                f'{pdf_sales_df["gross_profit_calc"].sum():,.2f}',
+            )
+        else:
+            pdf_sales_df["purchase_price_calc"] = 0.0
+            pdf_sales_df["estimated_cost_calc"] = 0.0
+            pdf_sales_df["gross_profit_calc"] = 0.0
+
+    except Exception as exc:
+        logger.warning("Gross profit calc skipped: %s: %s", type(exc).__name__, exc)
+        pdf_sales_df["purchase_price_calc"] = 0.0
+        pdf_sales_df["estimated_cost_calc"] = 0.0
+        pdf_sales_df["gross_profit_calc"] = 0.0
 
     logger.info(
         "PostgreSQL sales PDF dataset loaded: "
@@ -275,27 +397,30 @@ def prepare_postgres_radiator_dashboard_dataset(df: pd.DataFrame) -> pd.DataFram
     elif "abc_class" not in result.columns:
         result["abc_class"] = "C"
 
+    # Радиаторный спрос считаем строго как среднее по доступным месяцам продаж.
+    # Никаких весов, никаких старых формул.
     month_cols_for_demand = [
         "radiator_qty_jan_2026",
         "radiator_qty_feb_2026",
         "radiator_qty_mar_2026",
+        "radiator_qty_apr_2026",
+        "radiator_qty_may_2026",
     ]
-    available_month_cols = [col for col in month_cols_for_demand if col in result.columns]
+
+    available_month_cols = [
+        col for col in month_cols_for_demand
+        if col in result.columns
+    ]
+
+    for col in available_month_cols:
+        result[col] = pd.to_numeric(result[col], errors="coerce").fillna(0)
 
     if available_month_cols:
-        for col in available_month_cols + ["radiator_qty_apr_2026"]:
-            if col in result.columns:
-                column_data = result[col]
-            if isinstance(column_data, pd.DataFrame):
-                logger.warning(f"Radiator column {col} is duplicated; using first occurrence")
-                column_data = column_data.iloc[:, 0]
-            result[col] = pd.to_numeric(column_data, errors="coerce").fillna(0)
-
         result["radiator_monthly_demand"] = (
-            result[available_month_cols]
-            .mean(axis=1)
-            .round(2)
+            result[available_month_cols].mean(axis=1).round(2)
         )
+    else:
+        result["radiator_monthly_demand"] = 0.0
 
     result["radiator_coverage"] = result["abc_class"].map({"A": 1.0, "B": 0.7, "C": 0.5}).fillna(0.5)
 
@@ -410,6 +535,24 @@ def run_postgres_pipeline(base_dir: Path, config: dict) -> None:
         if removed_final_rows:
             logger.info(f"Final dashboard cleanup dropped rows: {removed_final_rows}")
 
+    # Release override: BAXI ECO 4S 24 / 24F actual warehouse stock is zero.
+    if "product_name" in final_df.columns:
+        name_norm = final_df["product_name"].astype(str).str.lower().str.replace("ё", "е", regex=False)
+        baxi_eco_4s_24_mask = (
+            name_norm.str.contains("baxi", na=False)
+            & name_norm.str.contains("eco", na=False)
+            & name_norm.str.contains("4s", na=False)
+            & name_norm.str.contains("24", na=False)
+        )
+        if baxi_eco_4s_24_mask.any():
+            final_df.loc[baxi_eco_4s_24_mask, "stock_qty"] = 0
+            final_df.loc[baxi_eco_4s_24_mask, "days_of_cover"] = 0
+            avg_daily = pd.to_numeric(final_df.loc[baxi_eco_4s_24_mask, "avg_daily_sales"], errors="coerce").fillna(0)
+            final_df.loc[baxi_eco_4s_24_mask, "recommended_order_qty"] = (avg_daily * 30).apply(lambda x: int(__import__("math").ceil(x)))
+            final_df.loc[baxi_eco_4s_24_mask, "recommended_order_qty_display"] = final_df.loc[baxi_eco_4s_24_mask, "recommended_order_qty"]
+            final_df.loc[baxi_eco_4s_24_mask, "stock_status"] = "out_of_stock"
+            logger.info(f"BAXI ECO 4S 24/24F stock override applied before export/dashboard: {int(baxi_eco_4s_24_mask.sum())} rows")
+
     output_dir = base_dir / config["paths"]["output_dir"]
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -420,6 +563,67 @@ def run_postgres_pipeline(base_dir: Path, config: dict) -> None:
     classified_path = output_dir / "procurement_south_dashboard_classified.xlsx"
     final_df.to_excel(classified_path, index=False)
     logger.success(f"Classified procurement dataset saved to {classified_path}")
+
+    # Release override: BAXI ECO 4S 24 / 24F showed phantom stock from 1C stock slice.
+    # Business check: these SKUs are actually zero on warehouse, so force dashboard stock to 0.
+    if "product_name" in final_df.columns:
+        name_norm = final_df["product_name"].astype(str).str.lower().str.replace("ё", "е", regex=False)
+        baxi_eco_4s_mask = (
+            name_norm.str.contains("baxi", na=False)
+            & name_norm.str.contains("eco", na=False)
+            & name_norm.str.contains("4s", na=False)
+            & name_norm.str.contains("24", na=False)
+        )
+        if baxi_eco_4s_mask.any():
+            final_df.loc[baxi_eco_4s_mask, "stock_qty"] = 0
+            final_df.loc[baxi_eco_4s_mask, "days_of_cover"] = 0
+            if "avg_daily_sales" in final_df.columns:
+                avg_daily = pd.to_numeric(final_df.loc[baxi_eco_4s_mask, "avg_daily_sales"], errors="coerce").fillna(0)
+                final_df.loc[baxi_eco_4s_mask, "recommended_order_qty"] = (avg_daily * 30).apply(lambda x: int(__import__("math").ceil(x)))
+                final_df.loc[baxi_eco_4s_mask, "recommended_order_qty_display"] = final_df.loc[baxi_eco_4s_mask, "recommended_order_qty"]
+            final_df.loc[baxi_eco_4s_mask, "stock_status"] = "out_of_stock"
+            logger.info(f"BAXI ECO 4S stock override applied: {int(baxi_eco_4s_mask.sum())} rows")
+
+    # Replace old radiator rows with freshly prepared radiator_df before dashboard/PDF render.
+    if "radiator_df" in locals() and radiator_df is not None and not radiator_df.empty:
+        before_rows = len(final_df)
+
+        product_group_series = final_df.get("product_group", "")
+        non_radiators = final_df[
+            ~product_group_series.astype(str).str.lower().str.contains("радиатор", na=False)
+        ].copy()
+
+        final_df = pd.concat(
+            [non_radiators, radiator_df.copy()],
+            ignore_index=True,
+            sort=False,
+        )
+
+        logger.info(
+            "Replaced radiator rows before dashboard render: "
+            f"before={before_rows}, after={len(final_df)}, radiator_rows={len(radiator_df)}"
+        )
+
+        debug_mask = final_df["product_name"].astype(str).str.contains(r"500//22\*1000", regex=True, na=False)
+        debug_cols = [
+            "product_name",
+            "radiator_qty_jan_2026",
+            "radiator_qty_feb_2026",
+            "radiator_qty_mar_2026",
+            "radiator_qty_apr_2026",
+            "radiator_qty_may_2026",
+            "radiator_monthly_demand",
+            "free_stock_qty",
+            "recommended_order_qty_display",
+        ]
+        debug_cols = [col for col in debug_cols if col in final_df.columns]
+        if debug_mask.any():
+            logger.info(
+                "DEBUG 500//22*1000 before dashboard:\n"
+                + final_df.loc[debug_mask, debug_cols].to_string(index=False)
+            )
+    else:
+        logger.warning("radiator_df not available before dashboard render; cannot replace radiator rows")
 
     dashboard_path = output_dir / "dashboard_postgres.html"
     # Final safety before dashboard rendering.
@@ -433,6 +637,85 @@ def run_postgres_pipeline(base_dir: Path, config: dict) -> None:
     final_df.loc[stock_qty_series <= 0, "stock_status"] = "out_of_stock"
     final_df.loc[(stock_qty_series > 0) & (recommended_series > 0), "stock_status"] = "critical"
 
+    # HARD FINAL FIX: recalc radiator demand directly in final_df immediately before dashboard render.
+    radiator_month_cols = [
+        "radiator_qty_jan_2026",
+        "radiator_qty_feb_2026",
+        "radiator_qty_mar_2026",
+        "radiator_qty_apr_2026",
+        "radiator_qty_may_2026",
+    ]
+    available_radiator_month_cols = [col for col in radiator_month_cols if col in final_df.columns]
+
+    if available_radiator_month_cols:
+        radiator_mask = (
+            final_df.get("product_name", "")
+            .astype(str)
+            .str.lower()
+            .str.contains("радиатор", na=False)
+        )
+
+        for col in available_radiator_month_cols:
+            final_df[col] = pd.to_numeric(final_df[col], errors="coerce").fillna(0)
+
+        final_df.loc[radiator_mask, "radiator_monthly_demand"] = (
+            final_df.loc[radiator_mask, available_radiator_month_cols]
+            .mean(axis=1)
+            .round(2)
+        )
+
+        debug_mask = final_df.get("product_name", "").astype(str).str.contains(r"500//22\*1000", regex=True, na=False)
+        debug_cols = [
+            "product_name",
+            "radiator_qty_jan_2026",
+            "radiator_qty_feb_2026",
+            "radiator_qty_mar_2026",
+            "radiator_qty_apr_2026",
+            "radiator_qty_may_2026",
+            "radiator_monthly_demand",
+        ]
+        debug_cols = [col for col in debug_cols if col in final_df.columns]
+        if debug_mask.any():
+            logger.info(
+                "HARD FINAL radiator demand before build_dashboard:\n"
+                + final_df.loc[debug_mask, debug_cols].to_string(index=False)
+            )
+
+    # HARD FINAL FIX in PostgreSQL pipeline only.
+    radiator_month_cols = [
+        "radiator_qty_jan_2026",
+        "radiator_qty_feb_2026",
+        "radiator_qty_mar_2026",
+        "radiator_qty_apr_2026",
+        "radiator_qty_may_2026",
+    ]
+    available_radiator_month_cols = [col for col in radiator_month_cols if col in final_df.columns]
+
+    if available_radiator_month_cols:
+        radiator_mask = final_df["product_name"].astype(str).str.lower().str.contains("радиатор", na=False)
+
+        for col in available_radiator_month_cols:
+            final_df[col] = pd.to_numeric(final_df[col], errors="coerce").fillna(0)
+
+        final_df.loc[radiator_mask, "radiator_monthly_demand"] = (
+            final_df.loc[radiator_mask, available_radiator_month_cols].mean(axis=1).round(2)
+        )
+
+        debug_mask = final_df["product_name"].astype(str).str.contains(r"500//22\*1000", regex=True, na=False)
+        debug_cols = [
+            "product_name",
+            "radiator_qty_jan_2026",
+            "radiator_qty_feb_2026",
+            "radiator_qty_mar_2026",
+            "radiator_qty_apr_2026",
+            "radiator_qty_may_2026",
+            "radiator_monthly_demand",
+        ]
+        logger.info(
+            "POSTGRES HARD FINAL radiator demand before build_dashboard:\n"
+            + final_df.loc[debug_mask, debug_cols].to_string(index=False)
+        )
+
     build_dashboard(final_df, str(dashboard_path))
     logger.success(f"PostgreSQL dashboard saved to {dashboard_path}")
 
@@ -445,7 +728,7 @@ def run_postgres_pipeline(base_dir: Path, config: dict) -> None:
             "This prevents accidental fallback to procurement PDF layout."
         )
     else:
-        build_pdf_report(final_df, pdf_sales_df, str(pdf_path), period_label="14.01.2026 – 14.04.2026", pdf_sales_df=pdf_sales_df)
+        build_pdf_report(final_df, pdf_sales_df, str(pdf_path), period_label="Последние 3 месяца", pdf_sales_df=pdf_sales_df)
         logger.success(f"Executive sales PDF report saved to {pdf_path}")
 
     logger.success("PostgreSQL pipeline completed successfully.")
@@ -726,6 +1009,7 @@ def main():
         "radiator_qty_feb_2026",
         "radiator_qty_mar_2026",
         "radiator_qty_apr_2026",
+        "radiator_qty_may_2026",
     ]
     available_radiator_debug_columns = [col for col in radiator_debug_columns if col in merged_df.columns]
     if available_radiator_debug_columns:
@@ -747,6 +1031,7 @@ def main():
         "radiator_qty_feb_2026",
         "radiator_qty_mar_2026",
         "radiator_qty_apr_2026",
+        "radiator_qty_may_2026",
         "free_stock_qty",
     ]
     available_radiator_metrics_debug_columns = [col for col in radiator_metrics_debug_columns if col in merged_df.columns]
