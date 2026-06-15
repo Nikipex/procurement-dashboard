@@ -120,23 +120,53 @@ WHERE sales_qty_60d > 0
 ORDER BY sales_qty_60d DESC
 ),
 stock_south_warehouse AS (
-WITH latest_period AS (
-    SELECT MAX(s._period) AS max_period
+WITH total_stock AS (
+    SELECT
+        s._period AS stock_period,
+        s._fld9098rref AS product_id,
+        SUM(s._fld9106) AS total_stock_qty,
+        SUM(s._fld9107) AS stock_amount
     FROM public._accumrgt9117 s
     WHERE s._fld9099rref = decode('83ee60f67771497111e9dbb16ec97a48','hex')
+      AND s._period = TIMESTAMP '3999-11-01 00:00:00'
+    GROUP BY s._period, s._fld9098rref
+),
+reserved_stock AS (
+    SELECT
+        r._fld9301rref AS product_id,
+        SUM(GREATEST(COALESCE(r._fld9305, 0), 0)) AS reserved_stock_qty
+    FROM public._accumrgt9308 r
+    WHERE r._fld9300rref = decode('83ee60f67771497111e9dbb16ec97a48','hex')
+      AND r._period = TIMESTAMP '3999-11-01 00:00:00'
+    GROUP BY r._fld9301rref
+),
+south_stock AS (
+    SELECT
+        COALESCE(t.product_id, r.product_id) AS product_id,
+        COALESCE(t.stock_period, TIMESTAMP '3999-11-01 00:00:00') AS stock_period,
+        COALESCE(t.total_stock_qty, 0) AS total_stock_qty,
+        COALESCE(r.reserved_stock_qty, 0) AS reserved_stock_qty,
+        GREATEST(
+            COALESCE(t.total_stock_qty, 0) - COALESCE(r.reserved_stock_qty, 0),
+            0
+        ) AS free_stock_qty,
+        COALESCE(t.stock_amount, 0) AS stock_amount
+    FROM total_stock t
+    FULL OUTER JOIN reserved_stock r
+        ON r.product_id = t.product_id
 )
 SELECT
-    s._period AS stock_period,
+    st.stock_period,
     n._code::text AS product_code,
     n._description::text AS product_name,
-    s._fld9106 AS stock_qty,
-    s._fld9107 AS stock_amount
-FROM public._accumrgt9117 s
+    st.free_stock_qty AS stock_qty,
+    st.total_stock_qty,
+    st.reserved_stock_qty,
+    st.stock_amount
+FROM south_stock st
 JOIN public._reference80 n
-    ON s._fld9098rref = n._idrref
-WHERE s._fld9099rref = decode('83ee60f67771497111e9dbb16ec97a48','hex')
-  AND s._period = (SELECT max_period FROM latest_period)
-  AND s._fld9106 <> 0
+    ON st.product_id = n._idrref
+WHERE st.free_stock_qty <> 0
 ),
 stock_south_warehouse_agg AS (
 WITH current_stock AS (

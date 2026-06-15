@@ -52,6 +52,81 @@ def add_css(html: str) -> str:
     return css + html
 
 
+
+def force_radiator_low_stock_warning(html: str) -> str:
+    """Add warning icon to radiator rows with positive but risky low stock.
+
+    Radiator table columns after formatting:
+    0 name
+    1 ABC
+    2 stock
+    3 Jan
+    4 Feb
+    5 Mar
+    6 Apr
+    7 May
+    8 Jun
+    9 monthly demand
+    10 coverage badge
+    11 order qty badge
+    """
+
+    def parse_num(value: str) -> float:
+        clean = re.sub(r"<.*?>", "", value, flags=re.S)
+        clean = clean.replace("&nbsp;", " ").replace(" ", "").replace(",", ".").strip()
+        try:
+            return float(clean)
+        except Exception:
+            return 0.0
+
+    def patch_row(match: re.Match[str]) -> str:
+        row = match.group(0)
+
+        if "radiator-low-stock-icon" in row:
+            return row
+
+        # Only radiator rows.
+        if "радиатор" not in row.lower():
+            return row
+
+        # Do not touch non-core/vendor rows if they still appear.
+        lowered = row.lower()
+        if any(x in lowered for x in ["ruterm", "orso", "sanline", "proexpert", "vcr", "vcu"]):
+            return row
+
+        tds = list(re.finditer(r"<td>(.*?)</td>", row, flags=re.S))
+        if len(tds) < 12:
+            return row
+
+        stock_cell = tds[2]
+        stock = parse_num(stock_cell.group(1))
+        monthly_demand = parse_num(tds[9].group(1))
+        order_qty = parse_num(tds[11].group(1))
+
+        # Warning rule:
+        # positive stock exists, but there is real demand and dashboard recommends ordering.
+        # This catches technical/near-empty leftovers like 300//22*1800: stock=3, demand=11.2, order=16.
+        if not (0 < stock <= 5 and monthly_demand > 0 and order_qty > 0):
+            return row
+
+        inner = stock_cell.group(1)
+        new_cell = (
+            f"<td>{inner}"
+            '<span class="stock-risk-icon radiator-low-stock-icon" '
+            'title="Критически малый остаток по радиатору. Есть спрос и рекомендация к заказу — проверьте остаток в 1С.">⚠️</span>'
+            "</td>"
+        )
+
+        return row[:stock_cell.start()] + new_cell + row[stock_cell.end():]
+
+    return re.sub(
+        r"<tr>\s*<td>.*?радиатор.*?</tr>",
+        patch_row,
+        html,
+        flags=re.S | re.I,
+    )
+
+
 def force_baxi_warning(html: str) -> str:
     def patch_row(match: re.Match[str]) -> str:
         row = match.group(0)
@@ -91,6 +166,7 @@ def main() -> None:
 
     html = normalize_numbers(html)
     html = force_baxi_warning(html)
+    html = force_radiator_low_stock_warning(html)
 
     HTML_PATH.write_text(html)
 

@@ -20,3 +20,27 @@ __pycache__/
 .env
 data/output/
 
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtualenv
+venv/
+.venv/
+
+# Runtime outputs
+data/output/
+data/exports/
+data/raw/
+logs/
+*.log
+
+# Local backup files
+*.bak
+*.bak_*
+
+# Generated reports
+*.pdf
+*.html
+*.csv
