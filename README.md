@@ -1,148 +1,232 @@
-# Procurement Dashboard
+Procurement Dashboard
 
-Internal dashboard for procurement department.
+Internal Business Intelligence platform for procurement and inventory management in a gas equipment distribution company.
 
-## Stack
-- Python
-- Pandas
-- Plotly
-- Jinja2
+⸻
 
-## Features
-- stock analysis
-- critical items
-- supplier metrics
-- automated reports
+Overview
 
-# Procurement Dashboard
+Procurement Dashboard is a production-oriented analytics system built to replace manual Excel workflows and provide real-time visibility into sales, inventory, purchasing and supplier performance.
 
-Internal BI system for procurement department (gas equipment company).
+The platform operates on real company data extracted directly from 1C PostgreSQL and serves as the foundation for procurement decision-making.
 
----
+Current ecosystem:
 
-## Project Overview
+1C PostgreSQL → Data Layer → Analytics Engine → Dashboard → Executive PDF Reports
 
-This project replaces manual Excel-based workflows with a direct PostgreSQL (1C) data pipeline.
+⸻
 
-It includes:
+Business Goals
 
-- Procurement Dashboard (HTML)
-- Executive PDF Report
-- (Future) Telegram Bot for managers
+The system helps procurement teams:
 
----
+* Reduce manual reporting
+* Monitor inventory levels
+* Detect critical stock shortages
+* Forecast purchasing needs
+* Optimize supplier decisions
+* Improve stock turnover
+* Increase visibility across product categories
 
-## Data Source
+⸻
+
+Core Features
+
+Inventory Analytics
+
+* Current stock monitoring
+* Reserved stock tracking
+* Available stock calculation
+* Days of cover analysis
+* Critical stock detection
+* Warehouse-level visibility
+
+Procurement Planning
+
+* Demand forecasting
+* Purchase recommendations
+* Velocity classification
+    * FAST
+    * MEDIUM
+    * SLOW
+* Reorder calculations
+* Procurement prioritization
+
+Product Categories
+
+* Gas boilers
+* Water heaters
+* Radiators
+* Pumps
+* Chimney systems
+* Voltage stabilizers
+* Accessories
+
+Reporting
+
+* Interactive HTML dashboard
+* Executive PDF reports
+* ABC analysis
+* Gross profit analytics
+* Product rankings
+* Sales performance metrics
+
+⸻
+
+Data Sources
 
 Primary source:
 
-- 1C PostgreSQL dump (read-only)
+* 1C PostgreSQL (read-only)
 
-Key entities discovered:
+Additional sources:
 
-- Sales documents → `public._document240`
-- Sales lines → `public._document240_vt6039`
-- Products → `public._reference80`
-- Warehouses → `public._reference100`
+* Supplier price lists
+* Historical sales datasets
+* Inventory registers
+* Procurement planning datasets
 
-### South Warehouse
+⸻
 
-Identified real warehouse:
+1C PostgreSQL Reverse Engineering
 
-- Name: Южный склад
-- ID: `83ee60f67771497111e9dbb16ec97a48`
+Key entities discovered during project development:
 
----
+Documents
 
-## SQL Structure
+Sales documents:
 
-```
-sql/
-├── views/     # reusable data views
-├── research/  # exploratory queries (1C reverse engineering)
-├── checks/    # validation & sanity checks
-```
+public._document240
 
-### Key Views
+Sales lines:
 
-- `sales_lines_gross_profit.sql`
-- `stock_south_warehouse.sql`
+public._document240_vt6039
 
-#### stock_south_warehouse
+Products
 
-Source: `public._accumrgt9117`
+public._reference80
 
-- warehouse → `_fld9099rref`
-- product   → `_fld9098rref`
-- stock_qty → `_fld9106`
-- amount    → `_fld9107`
+Warehouses
 
-Provides real stock data for South warehouse.
+public._reference100
 
----
+Inventory Registers
 
-## Stack
+public._accumrgt9117
 
-- Python 3.12+
-- PostgreSQL
-- SQLAlchemy
-- Pandas
-- Plotly
-- Jinja2
-- ReportLab / WeasyPrint (PDF)
-- python-dotenv
+Used for real stock calculations.
 
----
+⸻
 
-## Project Structure
+South Warehouse
 
-```
-app/        # business logic (services, reports)
-scripts/    # dev & debug scripts
-sql/        # SQL layer (views, research, checks)
-data/       # raw & processed data
-output/     # generated reports
-```
+Main operational warehouse:
 
----
+Name:
 
-## Current Status
+ЮЖНЫЙ склад
 
-- ✅ Connected to real 1C PostgreSQL
-- ✅ Extracted sales data (90 days)
-- ✅ Identified South warehouse
-- ✅ Extracted stock data from register `_accumrgt9117`
-- ✅ Built working SQL views
-- ✅ PDF report v2 working
+Warehouse ID:
 
----
+83ee60f67771497111e9dbb16ec97a48
 
-## Next Steps
+⸻
 
-1. Build `sales_south_warehouse` view
-2. Merge stock + sales
-3. Calculate:
-   - avg daily sales
-   - days of cover
-   - critical stock
-4. Build Procurement Dashboard MVP
-5. Build PDF v3
-6. Add procurement recommendation logic
+Architecture
 
----
+1C PostgreSQL
 
-## Goal
+↓
 
-Deliver a production-ready internal tool that:
+SQL Views
 
-- reduces manual work
-- improves procurement decisions
-- provides real-time stock & sales visibility
+↓
 
----
+Normalization Layer
 
-## Notes
+↓
 
-- Project uses real company data (read-only)
-- SQL layer is the core source of truth
-- Designed to evolve into full BI system
+Analytics Services
+
+↓
+
+Dashboard / PDF Reports
+
+⸻
+
+Technology Stack
+
+Backend
+
+* Python 3.12+
+* PostgreSQL
+* SQLAlchemy
+* Pandas
+
+Analytics
+
+* Plotly
+* NumPy
+
+Presentation
+
+* Jinja2
+* HTML Dashboard
+* ReportLab
+* WeasyPrint
+
+Infrastructure
+
+* Redis
+* Docker
+* Systemd
+
+⸻
+
+Reliability
+
+Implemented reliability mechanisms:
+
+* PostgreSQL integration
+* Snapshot fallback catalog
+* Redis caching
+* Automated refresh jobs
+* Last-known-good inventory snapshots
+
+The platform can continue operating with cached inventory data even during temporary database outages.
+
+⸻
+
+Current Status
+
+Production / Internal Commercial Use
+
+Completed:
+
+* Connected to real 1C PostgreSQL
+* Reverse engineered key 1C structures
+* Built SQL analytics layer
+* Implemented inventory calculations
+* Implemented procurement logic
+* Implemented executive PDF reporting
+* Implemented dashboard analytics
+
+Used on real sales and inventory data.
+
+⸻
+
+Roadmap
+
+* Supplier Intelligence
+* Advanced Forecasting
+* Automated Procurement Recommendations
+* Expanded Supplier Analytics
+* AI-assisted Procurement Insights
+
+⸻
+
+Project Type
+
+Commercial Internal Tool
+
+Built for a real gas equipment distribution company and used on production business data.
